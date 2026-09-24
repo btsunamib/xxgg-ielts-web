@@ -4,22 +4,24 @@
  * Touch adaptation for the highlight + annotation popup.
  *
  * Trigger model
- *   DOUBLE TAP selects a word and opens the popup, matching the desktop
- *   drag-release feel. Long-press is not used (iOS hijacks it for its own
- *   callout menu).
+ *   DOUBLE TAP selects a word and opens the popup. Long-press is not used
+ *   (iOS hijacks it for its own callout menu).
  *
- * Why we build the selection ourselves
- *   The reading areas carry `touch-action: manipulation` so a double tap does
- *   not zoom the page. The side effect is that iOS then also refuses to perform
- *   its native double-tap word selection - `window.getSelection()` stays empty
- *   and the app's mouseup handler bails out. So instead of relying on the
- *   system, we resolve the tapped position with `caretRangeFromPoint`, expand it
- *   to word boundaries, install that Range into the selection, and only then
- *   replay `mouseup` for the app.
+ * One-shot semantics (important)
+ *   A double tap arms exactly ONE fire. Once the popup has been triggered the
+ *   arming is cleared immediately, so a later tap elsewhere is left alone and
+ *   the app's own outside-click handler can close the popup. Earlier revisions
+ *   kept the flag set and re-fired on every selectionchange, which made a
+ *   dismiss tap rebuild the selection at the new position instead of closing.
+ *
+ * Why the selection is built manually
+ *   Reading areas carry `touch-action: manipulation` so double tap does not
+ *   zoom. That also stops iOS from performing its native double-tap word
+ *   selection, so we resolve the tapped point with caretRangeFromPoint,
+ *   expand to word boundaries, install that Range, then replay `mouseup`.
  *
  * Diagnostics
- *   Open the site with ?touchdebug=1 and a panel appears at the bottom logging
- *   every step. Use its Copy button to send the log back.
+ *   Open with ?touchdebug=1 for the on-screen log panel.
  */
 (function () {
   'use strict';
@@ -35,15 +37,23 @@
   var MAIN = '.main-content';
   var TEXT_AREAS = '.main-content, .text-panel, .passage, .article, [class*="text-body"], [class*="reading"], [class*="article-body"]';
 
-  var DOUBLE_TAP_MS = 340;
-  var DOUBLE_TAP_PX = 40;
+  var DOUBLE_TAP_MS = 320;
+  var DOUBLE_TAP_PX = 36;
+  var ARM_TIMEOUT_MS = 1200;
 
   var lastTapAt = 0;
   var lastTapX = 0;
   var lastTapY = 0;
+
   var armed = false;
+  var fired = false;
+  var armTimer = null;
+  var retryTimers = [];
+
+  var tapX = 0;
+  var tapY = 0;
+
   var lastKey = '';
-  var timer = null;
   var touchEndCount = 0;
 
   /* ------------------------------------------------------------------ */
@@ -131,6 +141,30 @@
   }
 
   /* ------------------------------------------------------------------ */
+  /* Arming lifecycle                                                    */
+  /* ------------------------------------------------------------------ */
+  function clearRetries() {
+    for (var i = 0; i < retryTimers.length; i++) clearTimeout(retryTimers[i]);
+    retryTimers = [];
+  }
+
+  function disarm(reason) {
+    if (armTimer) { clearTimeout(armTimer); armTimer = null; }
+    clearRetries();
+    if (armed || fired) log('disarm (' + reason + ')');
+    armed = false;
+    fired = false;
+  }
+
+  function arm() {
+    disarm('re-arm');
+    armed = true;
+    fired = false;
+    lastKey = '';
+    armTimer = setTimeout(function () { disarm('timeout'); }, ARM_TIMEOUT_MS);
+  }
+
+  /* ------------------------------------------------------------------ */
   /* Selection helpers                                                   */
   /* ------------------------------------------------------------------ */
   function currentSelection() {
@@ -189,30 +223,16 @@
 
   var WORD_CHAR = /[A-Za-z0-9\u00c0-\u024f'\u2019-]/;
 
-  function textNodeAt(node, offset, forward) {
+  function firstTextNode(el) {
     try {
-      if (node && node.nodeType === 3) return node;
-      var el = node;
       if (!el) return null;
       var walker = D.createTreeWalker(el, NodeFilter.SHOW_TEXT, null);
-      var n = walker.nextNode();
-      if (n) return n;
-      if (forward) {
-        var p = el.parentElement;
-        while (p) {
-          var w2 = D.createTreeWalker(p, NodeFilter.SHOW_TEXT, null);
-          var m = w2.nextNode();
-          if (m) return m;
-          p = p.parentElement;
-        }
-      }
-      return null;
+      return walker.nextNode();
     } catch (e) {
       return null;
     }
   }
 
-  // Build a word Range around the tapped position.
   function wordRangeAt(x, y) {
     var base = caretRangeAt(x, y);
     if (!base) return null;
@@ -220,7 +240,10 @@
     var node = base.startContainer;
     var offset = base.startOffset;
 
-    node = textNodeAt(node, offset, true);
+    if (node && node.nodeType !== 3) {
+      node = firstTextNode(node);
+      offset = 0;
+    }
     if (!node || node.nodeType !== 3) return null;
 
     var text = node.textContent || '';
@@ -234,7 +257,6 @@
     var e = offset;
     while (s > 0 && WORD_CHAR.test(text.charAt(s - 1))) s--;
     while (e < text.length && WORD_CHAR.test(text.charAt(e))) e++;
-
     if (s === e) return null;
 
     try {
@@ -266,7 +288,7 @@
       var cs = W.getComputedStyle(p);
       var r = p.getBoundingClientRect();
       return 'popup=present display=' + cs.display + ' vis=' + cs.visibility +
-        ' op=' + cs.opacity + ' z=' + cs.zIndex +
+        ' op=' + cs.opacity +
         ' rect=' + Math.round(r.left) + ',' + Math.round(r.top) + ',' + Math.round(r.width) + 'x' + Math.round(r.height);
     } catch (e) {
       return 'popup=ERR ' + (e && e.message);
@@ -294,31 +316,31 @@
     }
   }
 
+  /* ------------------------------------------------------------------ */
+  /* Fire - one shot per double tap                                      */
+  /* ------------------------------------------------------------------ */
   function fire(tag) {
-    var sel = currentSelection();
-    var built = 'native';
+    if (!armed || fired) {
+      log('fire(' + tag + ') skipped armed=' + armed + ' fired=' + fired);
+      return;
+    }
 
-    // iOS refuses native double-tap selection while touch-action:manipulation
-    // is in force, so fall back to building the word selection ourselves.
+    var sel = currentSelection();
+    var source = 'native';
+
     if (!sel) {
-      var r = wordRangeAt(lastTapX, lastTapY);
-      if (r) {
-        if (installSelection(r)) {
-          built = 'built';
-          sel = currentSelection();
-        } else {
-          built = 'build-install-failed';
-        }
+      var r = wordRangeAt(tapX, tapY);
+      if (r && installSelection(r)) {
+        source = 'built';
+        sel = currentSelection();
       } else {
-        built = 'build-failed';
+        source = r ? 'install-failed' : 'build-failed';
       }
     }
 
     if (!sel) {
-      log('fire(' + tag + ') -> no usable selection (source=' + built + ')');
-      armed = false;
-      lastKey = '';
-      return;
+      log('fire(' + tag + ') no selection (source=' + source + ') at ' + Math.round(tapX) + ',' + Math.round(tapY));
+      return; // stay armed so a later retry can succeed
     }
 
     var el = anchorElement(sel.range);
@@ -331,46 +353,46 @@
       inMain = main ? String(main.contains(n)) : 'no-main-content';
     } catch (e) { inMain = 'err'; }
 
-    log('fire(' + tag + ') source=' + built + ' text="' + sel.text.slice(0, 24) +
-      '" len=' + sel.text.length +
-      ' anchor=' + (el ? el.tagName + '.' + String(el.className || '').split(' ')[0] : 'null') +
-      ' inTextArea=' + textAreaOk + ' inMainContent=' + inMain);
+    log('fire(' + tag + ') source=' + source + ' text="' + sel.text.slice(0, 22) +
+      '" inTextArea=' + textAreaOk + ' inMainContent=' + inMain);
 
-    if (!textAreaOk) return;
+    if (!textAreaOk) {
+      disarm('outside-text-area');
+      return;
+    }
 
     var rect = null;
     try { rect = sel.range.getBoundingClientRect(); } catch (e) { rect = null; }
 
     var key = sel.text + '|' + (rect ? Math.round(rect.left) + ',' + Math.round(rect.top) : '');
     if (key === lastKey) {
-      log('fire(' + tag + ') -> deduped');
+      log('fire(' + tag + ') deduped');
       return;
     }
     lastKey = key;
 
-    var x = rect ? Math.round(rect.left + rect.width / 2) : lastTapX;
-    var y = rect ? Math.round(rect.bottom) : lastTapY;
+    var x = rect ? Math.round(rect.left + rect.width / 2) : tapX;
+    var y = rect ? Math.round(rect.bottom) : tapY;
 
     var how = dispatchMouseUp(el, x, y);
     log('dispatched=' + how + ' at ' + x + ',' + y);
+
+    // One shot: never re-fire for this double tap.
+    fired = true;
+    disarm('fired');
 
     setTimeout(function () { log('after 60ms  ' + popupReport()); }, 60);
     setTimeout(function () { log('after 300ms ' + popupReport()); }, 300);
   }
 
-  function schedule(delay) {
-    if (timer) clearTimeout(timer);
-    timer = setTimeout(function () { fire('scheduled'); }, delay);
-  }
-
+  /* ------------------------------------------------------------------ */
+  /* Double-tap detection                                                */
+  /* ------------------------------------------------------------------ */
   function touchPoint(e) {
     var t = (e.changedTouches && e.changedTouches[0]) || null;
     return t ? { x: t.clientX, y: t.clientY } : { x: 0, y: 0 };
   }
 
-  /* ------------------------------------------------------------------ */
-  /* Double-tap detection                                                */
-  /* ------------------------------------------------------------------ */
   D.addEventListener('touchend', function (e) {
     touchEndCount++;
     var p = touchPoint(e);
@@ -387,22 +409,23 @@
     lastTapX = p.x;
     lastTapY = p.y;
 
-    if (!isDouble) return;
+    if (!isDouble) {
+      // A plain tap must never build a selection. Let the app close its popup.
+      return;
+    }
 
-    armed = true;
+    tapX = p.x;
+    tapY = p.y;
+    arm();
     log('DOUBLE TAP armed');
-    schedule(60);
-    setTimeout(function () { if (armed) fire('t+220'); }, 220);
-    setTimeout(function () { if (armed) fire('t+430'); }, 430);
+
+    retryTimers.push(setTimeout(function () { fire('t+70'); }, 70));
+    retryTimers.push(setTimeout(function () { fire('t+240'); }, 240));
+    retryTimers.push(setTimeout(function () { fire('t+450'); }, 450));
   }, true);
 
-  D.addEventListener('selectionchange', function () {
-    if (!armed) return;
-    schedule(400);
-  });
-
   /* ------------------------------------------------------------------ */
-  /* Styling: keep double-tap zoom off (we build the selection ourselves) */
+  /* Styling                                                             */
   /* ------------------------------------------------------------------ */
   function injectCss() {
     try {
@@ -427,14 +450,13 @@
   W.__xxggTouchSelection = {
     enabled: true,
     trigger: 'double-tap',
+    oneShot: true,
     debug: DEBUG,
+    disarm: disarm,
     fire: fire,
-    wordRangeAt: wordRangeAt,
     logs: function () { return logs.slice(); }
   };
 
-  log('module ready isTouch=' + isTouch + ' debug=' + DEBUG +
-      ' caretRangeFromPoint=' + (typeof D.caretRangeFromPoint) +
-      ' caretPositionFromPoint=' + (typeof D.caretPositionFromPoint));
-  log('UA=' + String(W.navigator && W.navigator.userAgent || '').slice(0, 110));
+  log('module ready oneShot=true armTimeout=' + ARM_TIMEOUT_MS +
+      ' dblTap=' + DOUBLE_TAP_MS + 'ms/' + DOUBLE_TAP_PX + 'px debug=' + DEBUG);
 })();
