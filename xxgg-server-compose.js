@@ -733,29 +733,67 @@
     unitStatusCache = {};
   }
 
+    // The flat /units endpoint carries no Part information, so candidates come
+  // from album units which DO carry partNo ("Part 1".."Part 4").
+  function partRank(partNo) {
+    var k = String(partNo || '').trim().toLowerCase();
+    var m = k.match(/(\d+)/);
+    if (m) return Number(m[1]);
+    return 99;
+  }
+
   function loadUnits(channel) {
     var key = normalizeChannel(channel) || 'reading';
     if (unitsCache[key]) return unitsCache[key];
-    var url = apiBase() + '/practice/v1/units?channel=' + encodeURIComponent(key);
-    unitsCache[key] = requestUpstream(url, { method: 'GET' }, UPSTREAM_TIMEOUT_MS)
+
+    var albumsUrl = apiBase() + '/practice/v1/albums';
+    unitsCache[key] = requestUpstream(albumsUrl, { method: 'GET' }, UPSTREAM_TIMEOUT_MS)
       .then(function (res) {
-        var list = res && res.ok ? extractList(res.data) : [];
+        var albums = res && res.ok ? extractList(res.data) : [];
+        var ids = [];
+        for (var i = 0; i < albums.length; i++) {
+          var a = isPlainObject(albums[i]) ? albums[i] : {};
+          var aid = str(a.id !== undefined && a.id !== null ? a.id : a.albumId);
+          if (aid) ids.push(aid);
+        }
+        return Promise.all(ids.map(function (aid) {
+          var u = apiBase() + '/practice/v1/albums/' + encodeURIComponent(aid) + '/units';
+          return requestUpstream(u, { method: 'GET' }, UPSTREAM_TIMEOUT_MS)
+            .then(function (r) { return r && r.ok ? extractList(r.data) : []; },
+                  function () { return []; });
+        }));
+      })
+      .then(function (lists) {
         var out = [];
-        for (var i = 0; i < list.length && out.length < MAX_POOL; i++) {
-          var u = isPlainObject(list[i]) ? list[i] : {};
-          var id = str(u.id !== undefined && u.id !== null ? u.id : u.unitId);
-          if (!id) continue;
-          out.push({
-            unitId: id,
-            titleEn: str(u.titleEn !== undefined && u.titleEn !== null ? u.titleEn
-              : (u.title !== undefined && u.title !== null ? u.title
-                : (u.subtitle !== undefined && u.subtitle !== null ? u.subtitle : id))),
-            titleZh: u.titleZh === null || u.titleZh === undefined ? '' : str(u.titleZh),
-            channel: normalizeChannel(u.channel) || key
-          });
+        var seen = {};
+        for (var li = 0; li < lists.length; li++) {
+          var list = lists[li] || [];
+          for (var i = 0; i < list.length && out.length < MAX_POOL; i++) {
+            var u = isPlainObject(list[i]) ? list[i] : {};
+            var id = str(u.id !== undefined && u.id !== null ? u.id : u.unitId);
+            if (!id || seen[id]) continue;
+            var ch = normalizeChannel(u.channel);
+            if (ch && ch !== key) continue;
+            var pn = str(u.partNo !== undefined && u.partNo !== null ? u.partNo : '');
+            if (!pn && Array.isArray(u.parts) && u.parts.length) {
+              pn = str(u.parts[0].partNo || '');
+            }
+            seen[id] = 1;
+            out.push({
+              unitId: id,
+              titleEn: str(u.titleEn !== undefined && u.titleEn !== null ? u.titleEn
+                : (u.title !== undefined && u.title !== null ? u.title
+                  : (u.subtitle !== undefined && u.subtitle !== null ? u.subtitle : id))),
+              titleZh: u.titleZh === null || u.titleZh === undefined ? '' : str(u.titleZh),
+              channel: ch || key,
+              partNo: pn || '',
+              partRank: partRank(pn)
+            });
+          }
         }
         return out;
       }, function () { return []; });
+
     return unitsCache[key];
   }
 
@@ -1018,47 +1056,59 @@
             '|' + (preferHighFrequency ? '1' : '0')
           ));
 
-          var warning = null;
-          var chosen = primary.slice();
-          shuffleInPlace(chosen, rnd);
-          if (preferHighFrequency) {
-            chosen.sort(function (x, y) { return (y.avgPct || 0) - (x.avgPct || 0); });
+                    var warning = null;
+
+          // Group by IELTS Part and take exactly ONE passage per Part, so a
+          // paper can never contain e.g. three Part 3 passages.
+          var usable = primary.length ? primary : pool;
+          var groups = {};
+          for (i = 0; i < usable.length; i++) {
+            var it = usable[i];
+            var gkey = it.partNo ? String(it.partNo) : ('Part ' + (it.partRank || 99));
+            if (!groups[gkey]) groups[gkey] = { partNo: gkey, rank: it.partRank || 99, items: [] };
+            groups[gkey].items.push(it);
           }
 
-          if (chosen.length < need && shortageFallbackConfirmed) {
-            var merged = chosen.slice();
-            var seen = {};
-            for (i = 0; i < merged.length; i++) seen[merged[i].unitId] = 1;
-            for (i = 0; i < secondary.length && merged.length < need; i++) {
-              if (seen[secondary[i].unitId]) continue;
-              seen[secondary[i].unitId] = 1;
-              merged.push(secondary[i]);
+          var gkeys = Object.keys(groups);
+          gkeys.sort(function (x, y) { return groups[x].rank - groups[y].rank; });
+
+          var chosen = [];
+          for (i = 0; i < gkeys.length; i++) {
+            var g = groups[gkeys[i]];
+            var items = g.items.slice();
+            shuffleInPlace(items, rnd);
+            if (preferHighFrequency) {
+              items.sort(function (x, y) { return (y.avgPct || 0) - (x.avgPct || 0); });
             }
-            if (merged.length > chosen.length) warning = 'MIXED_PRACTICE_REPEAT_ALLOWED';
-            chosen = merged;
+            if (items.length) chosen.push(items[0]);
           }
 
+          // Fewer distinct Parts than requested: top up from the rest rather
+          // than failing the compose.
           if (chosen.length < need) {
-            // Last resort: reuse the whole pool rather than failing the compose.
-            var seen2 = {};
-            for (i = 0; i < chosen.length; i++) seen2[chosen[i].unitId] = 1;
-            for (i = 0; i < pool.length && chosen.length < need; i++) {
-              if (seen2[pool[i].unitId]) continue;
-              seen2[pool[i].unitId] = 1;
-              chosen.push(pool[i]);
+            var usedIds = {};
+            for (i = 0; i < chosen.length; i++) usedIds[chosen[i].unitId] = 1;
+            var extra = secondary.slice();
+            if (!extra.length) extra = pool.slice();
+            shuffleInPlace(extra, rnd);
+            for (i = 0; i < extra.length && chosen.length < need; i++) {
+              if (usedIds[extra[i].unitId]) continue;
+              usedIds[extra[i].unitId] = 1;
+              chosen.push(extra[i]);
               warning = warning || 'MIXED_PRACTICE_REPEAT_ALLOWED';
             }
           }
 
-          chosen = chosen.slice(0, need);
+          chosen.sort(function (x, y) { return (x.partRank || 99) - (y.partRank || 99); });
 
           var slots = [];
           for (i = 0; i < chosen.length; i++) {
             var c = chosen[i];
-            var name = 'P' + (i + 1);
+            var rank = (c.partRank && c.partRank < 99) ? c.partRank : (i + 1);
+            var label = c.partNo || ('Part ' + rank);
             slots.push({
-              slot: name,
-              partNo: name,
+              slot: 'P' + rank,
+              partNo: label,
               partId: c.unitId,
               id: c.unitId,
               unitId: c.unitId,
