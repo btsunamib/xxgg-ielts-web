@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <title>九分学长考雅机考平台</title>
+    <script>
+      // GitHub Pages 对未知路径返回 404.html。这里把目标路由暂存到 sessionStorage，
+      // 回到站点根目录后由 index.html 用 history.replaceState 还原，实现 SPA 深链接。
+      (function () {
+        var CONFIGURED_BASE = "";
+        var basePath = CONFIGURED_BASE;
+        if (!basePath) {
+          // 自动模式：按项目页处理，去掉第一段（仓库名）
+          var segs = location.pathname.split("/").filter(Boolean);
+          basePath = segs.length ? "/" + segs[0] + "/" : "/";
+        }
+        var route = location.pathname.slice(basePath.length - 1) + location.search + location.hash;
+        try { sessionStorage.setItem("xxgg.gh.redirect", route); } catch (e) {}
+        location.replace(basePath);
+      })();
+    </script>
+  </head>
+  <body></body>
+</html>

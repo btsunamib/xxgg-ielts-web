@@ -1,0 +1,1 @@
+function n(r){if(typeof r!="number"||!Number.isFinite(r)||r<0)return null;const t=Math.floor(r);if(t>=3600){const o=Math.floor(t/3600),f=Math.floor(t%3600/60);return`${o} 小时 ${f} 分`}if(t>=60){const o=Math.floor(t/60),f=t%60;return f===0?`${o} 分钟`:`${o} 分 ${f} 秒`}return`${t} 秒`}export{n as f};
