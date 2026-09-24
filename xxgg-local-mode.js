@@ -886,20 +886,67 @@
     });
   }
 
+    function partRankOf(partNo) {
+    var k = str(partNo).trim().toLowerCase();
+    var m = k.match(/(\d+)/);
+    if (m) return Number(m[1]);
+    return 99;
+  }
+
   function loadUnits(channel) {
     var key = str(channel);
     if (unitsCache[key]) return Promise.resolve(unitsCache[key]);
-    var url = apiBase() + '/practice/v1/units?channel=' + encodeURIComponent(key);
-    return fetchJsonWithTimeout(url, UPSTREAM_TIMEOUT_MS).then(function (payload) {
-      unitsCache[key] = extractList(unwrap(payload));
-      return unitsCache[key];
+    var albumsUrl = apiBase() + '/practice/v1/albums';
+    return fetchJsonWithTimeout(albumsUrl, UPSTREAM_TIMEOUT_MS).then(function (payload) {
+      var albums = extractList(unwrap(payload));
+      var ids = [];
+      for (var i = 0; i < albums.length; i++) {
+        var a = isPlainObject(albums[i]) ? albums[i] : {};
+        var aid = str(a.id !== undefined && a.id !== null ? a.id : a.albumId);
+        if (aid) ids.push(aid);
+      }
+      return Promise.all(ids.map(function (aid) {
+        var u = apiBase() + '/practice/v1/albums/' + encodeURIComponent(aid) + '/units';
+        return fetchJsonWithTimeout(u, UPSTREAM_TIMEOUT_MS).then(function (p2) {
+          return extractList(unwrap(p2));
+        }, function () { return []; });
+      }));
+    }).then(function (lists) {
+      var out = [];
+      var seen = {};
+      for (var li = 0; li < lists.length; li++) {
+        var list = isArray(lists[li]) ? lists[li] : [];
+        for (var i = 0; i < list.length; i++) {
+          var u = isPlainObject(list[i]) ? list[i] : {};
+          var id = str(u.id !== undefined && u.id !== null ? u.id : u.unitId);
+          if (!id || seen[id]) continue;
+          var ch = normalizeChannel(u.channel);
+          if (ch && ch !== key) continue;
+          var pn = str(u.partNo !== undefined && u.partNo !== null ? u.partNo : '');
+          if (!pn && isArray(u.parts) && u.parts.length) pn = str(u.parts[0].partNo || '');
+          seen[id] = 1;
+          out.push({
+            id: id,
+            unitId: id,
+            title: u.title,
+            titleEn: u.titleEn,
+            titleZh: u.titleZh,
+            channel: ch || key,
+            partNo: pn || '',
+            partRank: partRankOf(pn)
+          });
+          if (out.length >= 400) break;
+        }
+      }
+      unitsCache[key] = out;
+      return out;
     }, function () {
       unitsCache[key] = [];
       return unitsCache[key];
     });
   }
 
-  function codeByPartFor(unitId) {
+function codeByPartFor(unitId) {
     var out = {};
     var rp = requiredPartsCache[str(unitId)];
     var list = isArray(rp) ? rp : (isPlainObject(rp) && isArray(rp.list) ? rp.list : []);
@@ -1955,13 +2002,17 @@
                 (u.subtitle !== undefined && u.subtitle !== null ? u.subtitle : id))
           );
           var titleZh = u.titleZh === null || u.titleZh === undefined ? null : str(u.titleZh);
-          var avgRaw = u.avgAccuracy !== undefined && u.avgAccuracy !== null ? u.avgAccuracy : u.avgAcc;
+                    var avgRaw = u.avgAccuracy !== undefined && u.avgAccuracy !== null ? u.avgAccuracy : u.avgAcc;
+          var pn = str(u.partNo !== undefined && u.partNo !== null ? u.partNo : '');
+          if (!pn && isArray(u.parts) && u.parts.length) pn = str(u.parts[0].partNo || '');
           pool.push({
             unitId: id,
             titleEn: titleEn,
             titleZh: titleZh,
             avgPct: pctOfEither(avgRaw === undefined || avgRaw === null ? 0.5 : avgRaw),
-            channel: normalizeChannel(u.channel) || channel
+            channel: normalizeChannel(u.channel) || channel,
+            partNo: pn || '',
+            partRank: partRankOf(pn)
           });
         }
 
@@ -1973,37 +2024,54 @@
 
         var rnd = makeRng(hash32(seed + '|' + channel + '|' + difficulty + '|' + (onlyUndone ? '1' : '0') +
           '|' + (preferHighFrequency ? '1' : '0')));
-        var warning = null;
-        var chosen = primary.slice();
-        shuffleInPlace(chosen, rnd);
-        if (preferHighFrequency) {
-          chosen.sort(function (x, y) { return (y.avgPct || 0) - (x.avgPct || 0); });
+                var warning = null;
+
+        // Group by IELTS Part and take exactly ONE passage per Part, so a paper
+        // can never contain e.g. three Part 3 passages.
+        var usable = primary.length ? primary : secondary;
+        if (!usable.length) usable = pool;
+        var byPart = {};
+        for (i = 0; i < usable.length; i++) {
+          var uu = usable[i];
+          var gk = uu.partNo ? str(uu.partNo) : ('Part ' + (uu.partRank || 99));
+          if (!byPart[gk]) byPart[gk] = { rank: uu.partRank || 99, items: [] };
+          byPart[gk].items.push(uu);
+        }
+        var gkeys = Object.keys(byPart);
+        gkeys.sort(function (x, y) { return byPart[x].rank - byPart[y].rank; });
+
+        var chosen = [];
+        for (i = 0; i < gkeys.length; i++) {
+          var grp = byPart[gkeys[i]];
+          var items = grp.items.slice();
+          shuffleInPlace(items, rnd);
+          if (preferHighFrequency) {
+            items.sort(function (x, y) { return (y.avgPct || 0) - (x.avgPct || 0); });
+          }
+          if (items.length) chosen.push(items[0]);
         }
 
-        if (chosen.length < need && shortageFallbackConfirmed) {
-          // The "difficulty-matched completed parts" fallback the app offers.
-          var extra = secondary.filter(function (c) { return !isUnitDone(c.unitId); });
-          var merged = chosen.slice();
-          for (i = 0; i < extra.length && merged.length < need; i++) merged.push(extra[i]);
-          if (merged.length > chosen.length) { warning = 'MIXED_PRACTICE_REPEAT_ALLOWED'; }
-          chosen = merged;
-        }
+        // Fewer distinct Parts than requested: top up rather than failing.
         if (chosen.length < need) {
-          // Last resort: reuse the whole pool rather than failing the compose.
-          var seen = {};
-          for (i = 0; i < chosen.length; i++) seen[chosen[i].unitId] = 1;
-          for (i = 0; i < pool.length && chosen.length < need; i++) {
-            if (seen[pool[i].unitId]) continue;
-            seen[pool[i].unitId] = 1;
-            chosen.push(pool[i]);
+          var usedIds = {};
+          for (i = 0; i < chosen.length; i++) usedIds[chosen[i].unitId] = 1;
+          var extra = secondary.slice();
+          if (!extra.length) extra = pool.slice();
+          shuffleInPlace(extra, rnd);
+          for (i = 0; i < extra.length && chosen.length < need; i++) {
+            if (usedIds[extra[i].unitId]) continue;
+            usedIds[extra[i].unitId] = 1;
+            chosen.push(extra[i]);
             warning = warning || 'MIXED_PRACTICE_REPEAT_ALLOWED';
           }
         }
 
+        chosen.sort(function (x, y) { return (x.partRank || 99) - (y.partRank || 99); });
         chosen = chosen.slice(0, need);
 
+
         return Promise.all(chosen.map(function (c) { return ensureExam(c.unitId); })).then(function (exams) {
-          var slots = [];
+                    var slots = [];
           for (i = 0; i < chosen.length; i++) {
             var c = chosen[i];
             var exam = exams[i];
@@ -2015,10 +2083,11 @@
               if (!en || en === c.unitId) en = str(part.title || part.titleEn || en);
               if (zh === null && part.titleZh !== undefined && part.titleZh !== null) zh = str(part.titleZh);
             }
-            var name = 'P' + (i + 1);
+            var rank = (c.partRank && c.partRank < 99) ? c.partRank : (i + 1);
+            var label = c.partNo || ('Part ' + rank);
             slots.push({
-              slot: name,
-              partNo: name,
+              slot: 'P' + rank,
+              partNo: label,
               partId: realPartId || c.unitId,
               id: realPartId || c.unitId,
               unitId: c.unitId,
@@ -2032,7 +2101,7 @@
             });
           }
 
-          var seq = nextSeq();
+var seq = nextSeq();
           var compositionId = 'local-mix-' + seq;
           store.compositions[compositionId] = {
             id: compositionId,
