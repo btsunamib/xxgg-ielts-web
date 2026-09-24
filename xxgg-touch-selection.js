@@ -1,29 +1,24 @@
 /**
  * xxgg-touch-selection.js
  * ---------------------------------------------------------------------------
- * Touch / mobile adaptation for the highlight + annotation feature.
+ * Touch adaptation for the highlight + annotation popup, with built-in
+ * on-screen diagnostics.
  *
- * Problem
- *   The app only wires mouse events for text selection:
- *       document.addEventListener("mouseup", Lt)
- *       document.addEventListener("selectionchange", Dt)
- *       document.addEventListener("click", Pt)
- *   There is no touchstart / touchend anywhere in the bundle, so on phones and
- *   tablets the popup that lets you highlight or annotate never opens.
+ * Trigger model
+ *   DOUBLE TAP selects a word and opens the popup, matching the desktop
+ *   drag-release feel. Long-press is intentionally NOT used because iOS
+ *   hijacks it for its own callout menu.
  *
- * Trigger model (deliberate)
- *   DOUBLE TAP selects a word and opens the popup - matching the desktop
- *   drag-release feel. Long-press is intentionally NOT used: iOS hijacks
- *   long-press for its own callout menu, which fights with the popup.
- *   After the double tap the user can still drag the selection handles; the
- *   popup refreshes then too.
- *
- * Safety
- *   - Activates only on touch-capable devices.
- *   - Only fires when a non-collapsed selection exists inside a reading area,
- *     so ordinary single taps never open anything.
- *   - De-duplicates by selection text + position.
- *   - Wrapped in try/catch everywhere; never throws into the app.
+ * Diagnostics
+ *   Open the site with ?touchdebug=1 (or set localStorage xxgg.touchDebug=1)
+ *   and a panel appears at the bottom logging every step:
+ *     - whether touch was detected
+ *     - each touchend and whether a double tap was recognised
+ *     - at fire time: does a selection exist, is it collapsed, its text,
+ *       and is its ancestor inside .main-content
+ *     - after dispatch: does .selection-popup exist in the DOM, and what are
+ *       its computed display / visibility / opacity / z-index / position
+ *   There is a Copy button so the log can be pasted back for analysis.
  */
 (function () {
   'use strict';
@@ -36,6 +31,7 @@
   if (!isTouch) return;
 
   var SEL_POPUP = '.selection-popup';
+  var MAIN = '.main-content';
   var TEXT_AREAS = '.main-content, .text-panel, .passage, .article, [class*="text-body"], [class*="reading"], [class*="article-body"]';
 
   var DOUBLE_TAP_MS = 340;
@@ -48,6 +44,95 @@
   var lastKey = '';
   var timer = null;
 
+  /* ------------------------------------------------------------------ */
+  /* Diagnostics                                                         */
+  /* ------------------------------------------------------------------ */
+  var logs = [];
+  var panel = null;
+  var logBox = null;
+
+  function debugOn() {
+    try {
+      if (/[?&#]touchdebug/.test(String(W.location.href))) return true;
+      if (W.localStorage && W.localStorage.getItem('xxgg.touchDebug') === '1') return true;
+    } catch (e) { /* noop */ }
+    return false;
+  }
+
+  var DEBUG = debugOn();
+
+  function log(msg) {
+    var line = (new Date().toISOString().slice(11, 23)) + '  ' + msg;
+    logs.push(line);
+    if (logs.length > 120) logs.shift();
+    if (DEBUG) renderPanel();
+    try { if (W.console) W.console.log('[touch] ' + msg); } catch (e) { /* noop */ }
+  }
+
+  function ensurePanel() {
+    if (!DEBUG || panel) return;
+    try {
+      panel = D.createElement('div');
+      panel.id = 'xxgg-touch-debug';
+      panel.setAttribute('style', [
+        'position:fixed', 'left:0', 'right:0', 'bottom:0', 'max-height:46vh',
+        'overflow:auto', 'z-index:2147483647', 'background:rgba(12,12,14,.94)',
+        'color:#e8e8ea', 'font:11px/1.45 ui-monospace,Menlo,Consolas,monospace',
+        'padding:8px 10px 10px', 'white-space:pre-wrap', 'word-break:break-word',
+        '-webkit-user-select:text', 'user-select:text'
+      ].join(';'));
+
+      var bar = D.createElement('div');
+      bar.setAttribute('style', 'display:flex;gap:8px;align-items:center;margin-bottom:6px');
+
+      var title = D.createElement('strong');
+      title.textContent = 'touch debug';
+      bar.appendChild(title);
+
+      var copyBtn = D.createElement('button');
+      copyBtn.textContent = 'Copy';
+      copyBtn.setAttribute('style', 'min-height:34px;padding:6px 12px;border-radius:6px;border:1px solid #555;background:#222;color:#eee;font-size:12px');
+      copyBtn.onclick = function () {
+        try {
+          var ta = D.createElement('textarea');
+          ta.value = logs.join('\n');
+          ta.setAttribute('style', 'position:fixed;left:-9999px');
+          D.body.appendChild(ta);
+          ta.select();
+          D.execCommand('copy');
+          D.body.removeChild(ta);
+          copyBtn.textContent = 'Copied';
+          setTimeout(function () { copyBtn.textContent = 'Copy'; }, 1500);
+        } catch (e) { copyBtn.textContent = 'Copy failed'; }
+      };
+      bar.appendChild(copyBtn);
+
+      var clearBtn = D.createElement('button');
+      clearBtn.textContent = 'Clear';
+      clearBtn.setAttribute('style', 'min-height:34px;padding:6px 12px;border-radius:6px;border:1px solid #555;background:#222;color:#eee;font-size:12px');
+      clearBtn.onclick = function () { logs.length = 0; renderPanel(); };
+      bar.appendChild(clearBtn);
+
+      panel.appendChild(bar);
+
+      logBox = D.createElement('div');
+      panel.appendChild(logBox);
+
+      (D.body || D.documentElement).appendChild(panel);
+    } catch (e) { /* noop */ }
+  }
+
+  function renderPanel() {
+    try {
+      ensurePanel();
+      if (logBox) logBox.textContent = logs.slice(-60).join('\n');
+      if (panel) panel.scrollTop = panel.scrollHeight;
+    } catch (e) { /* noop */ }
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* Selection helpers                                                   */
+  /* ------------------------------------------------------------------ */
   function currentSelection() {
     try {
       var sel = W.getSelection ? W.getSelection() : null;
@@ -81,46 +166,88 @@
     }
   }
 
-  function fire() {
-    var cur = currentSelection();
-    if (!cur) {
+  function popupReport() {
+    try {
+      var p = D.querySelector(SEL_POPUP);
+      if (!p) return 'popup=ABSENT';
+      var cs = W.getComputedStyle(p);
+      var r = p.getBoundingClientRect();
+      return 'popup=present display=' + cs.display + ' vis=' + cs.visibility +
+        ' op=' + cs.opacity + ' z=' + cs.zIndex +
+        ' rect=' + Math.round(r.left) + ',' + Math.round(r.top) + ',' + Math.round(r.width) + 'x' + Math.round(r.height);
+    } catch (e) {
+      return 'popup=ERR ' + (e && e.message);
+    }
+  }
+
+  function fire(tag) {
+    var sel = currentSelection();
+    if (!sel) {
+      log('fire(' + tag + ') -> no usable selection');
       armed = false;
       lastKey = '';
       return;
     }
 
-    var el = anchorElement(cur.range);
-    if (!inTextArea(el)) return;
+    var el = anchorElement(sel.range);
+    var textAreaOk = inTextArea(el);
+
+    var inMain = 'n/a';
+    try {
+      var main = D.querySelector(MAIN);
+      var n = sel.range.commonAncestorContainer;
+      inMain = main ? String(main.contains(n)) : 'no-main-content';
+    } catch (e) { inMain = 'err'; }
+
+    log('fire(' + tag + ') text="' + sel.text.slice(0, 24) + '" len=' + sel.text.length +
+      ' anchor=' + (el ? el.tagName + '.' + String(el.className || '').split(' ')[0] : 'null') +
+      ' inTextArea=' + textAreaOk + ' inMainContent=' + inMain);
+
+    if (!textAreaOk) return;
 
     var rect = null;
-    try { rect = cur.range.getBoundingClientRect(); } catch (e) { rect = null; }
+    try { rect = sel.range.getBoundingClientRect(); } catch (e) { rect = null; }
 
-    var key = cur.text + '|' + (rect ? Math.round(rect.left) + ',' + Math.round(rect.top) : '');
-    if (key === lastKey) return;
+    var key = sel.text + '|' + (rect ? Math.round(rect.left) + ',' + Math.round(rect.top) : '');
+    if (key === lastKey) {
+      log('fire(' + tag + ') -> deduped (unchanged selection)');
+      return;
+    }
     lastKey = key;
 
     var x = rect ? Math.round(rect.left + rect.width / 2) : 0;
     var y = rect ? Math.round(rect.bottom) : 0;
 
+    var dispatched = 'no';
     try {
       var ev = new MouseEvent('mouseup', {
         bubbles: true, cancelable: true, view: W,
         clientX: x, clientY: y, screenX: x, screenY: y
       });
       el.dispatchEvent(ev);
+      dispatched = 'MouseEvent';
     } catch (e) {
+      log('MouseEvent failed: ' + (e && e.message));
       try {
         var ev2 = D.createEvent('MouseEvents');
         ev2.initMouseEvent('mouseup', true, true, W, 0, x, y, x, y,
           false, false, false, false, 0, null);
         el.dispatchEvent(ev2);
-      } catch (e2) { /* give up quietly */ }
+        dispatched = 'legacy';
+      } catch (e2) {
+        log('legacy dispatch failed: ' + (e2 && e2.message));
+      }
     }
+
+    log('dispatched=' + dispatched + ' at ' + x + ',' + y);
+
+    setTimeout(function () { log('after 60ms  ' + popupReport()); }, 60);
+    setTimeout(function () { log('after 300ms ' + popupReport()); }, 300);
   }
 
   function schedule(delay) {
     if (timer) clearTimeout(timer);
-    timer = setTimeout(fire, delay);
+    timer = setTimeout(function () { fire('scheduled'); }, delay);
   }
 
   function touchPoint(e) {
@@ -131,12 +258,18 @@
   /* ------------------------------------------------------------------ */
   /* Double-tap detection                                                */
   /* ------------------------------------------------------------------ */
+  var touchEndCount = 0;
+
   D.addEventListener('touchend', function (e) {
+    touchEndCount++;
     var p = touchPoint(e);
     var now = Date.now();
-    var isDouble = (now - lastTapAt) <= DOUBLE_TAP_MS &&
+    var dt = now - lastTapAt;
+    var isDouble = (lastTapAt > 0) && dt <= DOUBLE_TAP_MS &&
                    Math.abs(p.x - lastTapX) <= DOUBLE_TAP_PX &&
                    Math.abs(p.y - lastTapY) <= DOUBLE_TAP_PX;
+
+    log('touchend#' + touchEndCount + ' at ' + p.x + ',' + p.y + ' dt=' + (lastTapAt ? dt : -1) + ' double=' + isDouble);
 
     lastTapAt = now;
     lastTapX = p.x;
@@ -145,16 +278,12 @@
     if (!isDouble) return;
 
     armed = true;
-    // The browser performs native word selection asynchronously, so try a few
-    // times rather than guessing a single delay.
+    log('DOUBLE TAP armed');
     schedule(60);
-    setTimeout(function () { if (armed) fire(); }, 220);
-    setTimeout(function () { if (armed) fire(); }, 430);
+    setTimeout(function () { if (armed) fire('t+220'); }, 220);
+    setTimeout(function () { if (armed) fire('t+430'); }, 430);
   }, true);
 
-  // After a double tap the user may drag the selection handles - keep the
-  // popup in sync. Not armed => this stays silent, so long-press alone does
-  // not open anything.
   D.addEventListener('selectionchange', function () {
     if (!armed) return;
     schedule(400);
@@ -169,7 +298,6 @@
       var st = D.createElement('style');
       st.id = 'xxgg-touch-css';
       st.textContent = [
-        // Disable double-tap zoom on reading areas so double tap = select word.
         TEXT_AREAS + '{touch-action:manipulation !important;}',
         SEL_POPUP + '{z-index:2147483000 !important;max-width:calc(100vw - 20px) !important;}',
         SEL_POPUP + ' button,' + SEL_POPUP + ' [role="button"],' + SEL_POPUP + ' .selection-action{',
@@ -184,11 +312,17 @@
   injectCss();
   D.addEventListener('DOMContentLoaded', injectCss);
 
-  // Diagnostics / manual trigger from a test page.
   W.__xxggTouchSelection = {
     enabled: true,
     trigger: 'double-tap',
+    debug: DEBUG,
     fire: fire,
-    schedule: schedule
+    schedule: schedule,
+    logs: function () { return logs.slice(); }
   };
+
+  log('module ready isTouch=' + isTouch + ' debug=' + DEBUG +
+      ' maxTouchPoints=' + (W.navigator ? W.navigator.maxTouchPoints : '?') +
+      ' touch-action=manipulation');
+  log('UA=' + String(W.navigator && W.navigator.userAgent || '').slice(0, 120));
 })();
