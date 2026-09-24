@@ -8,24 +8,21 @@
  *       document.addEventListener("mouseup", Lt)
  *       document.addEventListener("selectionchange", Dt)
  *       document.addEventListener("click", Pt)
- *   There is no touchstart / touchend anywhere in the bundle. On phones and
- *   tablets a long-press text selection does not reliably produce the `mouseup`
- *   that opens the highlight popup, so highlighting effectively only works
- *   with a mouse cursor.
+ *   There is no touchstart / touchend anywhere in the bundle, so on phones and
+ *   tablets the popup that lets you highlight or annotate never opens.
  *
- * What this does
- *   1. After a touch selection settles (touchend, or a debounced
- *      selectionchange while dragging the selection handles), it replays a
- *      synthetic `mouseup` on the element that owns the selection, so the app's
- *      existing handler runs and shows the popup.
- *   2. Makes the popup touch-friendly: larger tap targets, higher z-index so
- *      it is not buried under the page, and constrained to the viewport width.
+ * Trigger model (deliberate)
+ *   DOUBLE TAP selects a word and opens the popup - matching the desktop
+ *   drag-release feel. Long-press is intentionally NOT used: iOS hijacks
+ *   long-press for its own callout menu, which fights with the popup.
+ *   After the double tap the user can still drag the selection handles; the
+ *   popup refreshes then too.
  *
  * Safety
  *   - Activates only on touch-capable devices.
- *   - Only fires when the selection is non-collapsed and lives inside a reading
- *     text area, so ordinary taps never open the popup.
- *   - De-duplicates by selection text + position, so it never spams the app.
+ *   - Only fires when a non-collapsed selection exists inside a reading area,
+ *     so ordinary single taps never open anything.
+ *   - De-duplicates by selection text + position.
  *   - Wrapped in try/catch everywhere; never throws into the app.
  */
 (function () {
@@ -41,6 +38,13 @@
   var SEL_POPUP = '.selection-popup';
   var TEXT_AREAS = '.main-content, .text-panel, .passage, .article, [class*="text-body"], [class*="reading"], [class*="article-body"]';
 
+  var DOUBLE_TAP_MS = 340;
+  var DOUBLE_TAP_PX = 40;
+
+  var lastTapAt = 0;
+  var lastTapX = 0;
+  var lastTapY = 0;
+  var armed = false;
   var lastKey = '';
   var timer = null;
 
@@ -79,7 +83,11 @@
 
   function fire() {
     var cur = currentSelection();
-    if (!cur) { lastKey = ''; return; }
+    if (!cur) {
+      armed = false;
+      lastKey = '';
+      return;
+    }
 
     var el = anchorElement(cur.range);
     if (!inTextArea(el)) return;
@@ -115,13 +123,45 @@
     timer = setTimeout(fire, delay);
   }
 
-  // touchend fires before the browser's synthesized click; waiting past it
-  // avoids the app's click handler immediately closing the popup again.
-  D.addEventListener('touchend', function () { schedule(320); }, true);
-  D.addEventListener('selectionchange', function () { schedule(420); });
+  function touchPoint(e) {
+    var t = (e.changedTouches && e.changedTouches[0]) || null;
+    return t ? { x: t.clientX, y: t.clientY } : { x: 0, y: 0 };
+  }
 
   /* ------------------------------------------------------------------ */
-  /* Touch-friendly popup styling                                        */
+  /* Double-tap detection                                                */
+  /* ------------------------------------------------------------------ */
+  D.addEventListener('touchend', function (e) {
+    var p = touchPoint(e);
+    var now = Date.now();
+    var isDouble = (now - lastTapAt) <= DOUBLE_TAP_MS &&
+                   Math.abs(p.x - lastTapX) <= DOUBLE_TAP_PX &&
+                   Math.abs(p.y - lastTapY) <= DOUBLE_TAP_PX;
+
+    lastTapAt = now;
+    lastTapX = p.x;
+    lastTapY = p.y;
+
+    if (!isDouble) return;
+
+    armed = true;
+    // The browser performs native word selection asynchronously, so try a few
+    // times rather than guessing a single delay.
+    schedule(60);
+    setTimeout(function () { if (armed) fire(); }, 220);
+    setTimeout(function () { if (armed) fire(); }, 430);
+  }, true);
+
+  // After a double tap the user may drag the selection handles - keep the
+  // popup in sync. Not armed => this stays silent, so long-press alone does
+  // not open anything.
+  D.addEventListener('selectionchange', function () {
+    if (!armed) return;
+    schedule(400);
+  });
+
+  /* ------------------------------------------------------------------ */
+  /* Touch-friendly styling + disable double-tap zoom                    */
   /* ------------------------------------------------------------------ */
   function injectCss() {
     try {
@@ -129,6 +169,8 @@
       var st = D.createElement('style');
       st.id = 'xxgg-touch-css';
       st.textContent = [
+        // Disable double-tap zoom on reading areas so double tap = select word.
+        TEXT_AREAS + '{touch-action:manipulation !important;}',
         SEL_POPUP + '{z-index:2147483000 !important;max-width:calc(100vw - 20px) !important;}',
         SEL_POPUP + ' button,' + SEL_POPUP + ' [role="button"],' + SEL_POPUP + ' .selection-action{',
         '  min-height:44px !important;min-width:44px !important;font-size:15px !important;',
@@ -142,9 +184,10 @@
   injectCss();
   D.addEventListener('DOMContentLoaded', injectCss);
 
-  // Expose for diagnostics / manual trigger from a test page.
+  // Diagnostics / manual trigger from a test page.
   W.__xxggTouchSelection = {
     enabled: true,
+    trigger: 'double-tap',
     fire: fire,
     schedule: schedule
   };
