@@ -108,20 +108,26 @@
     } catch (e) { }
   }
 
-  D.addEventListener('keydown', function (e) {
+  var lastTabAt = 0;
+
+  function onTabKey(e) {
     try {
       var isTab = (e.key === 'Tab') || (e.keyCode === 9) || (e.which === 9);
       if (!isTab) return;
       if (e.ctrlKey || e.metaKey || e.altKey) return;
 
+      var now = Date.now();
+      // keydown / keyup / keypress for the SAME press arrive within a few ms.
+      if (now - lastTabAt < 60) return;
+      lastTabAt = now;
+
       var a = D.activeElement;
+      kbLog('Tab ' + e.type + ' active=' + (a ? a.tagName : 'none') + ' editable=' + kbEditable(a));
       if (!kbEditable(a)) return;
 
-      // Always swallow Tab while typing, so focus never leaves the paper.
       e.preventDefault();
       e.stopPropagation();
 
-      var now = Date.now();
       if (tabPressAt && (now - tabPressAt) <= TAB_DOUBLE_MS) {
         tabPressAt = 0;
         var moved = kbMove(e.shiftKey ? -1 : 1);
@@ -132,7 +138,41 @@
         kbLog('Tab #1 armed - press Tab again to move');
       }
     } catch (err) { }
+  }
+
+  // Some iPadOS builds only surface one of these, so listen to all three.
+  D.addEventListener('keydown', onTabKey, true);
+  D.addEventListener('keyup', onTabKey, true);
+  D.addEventListener('keypress', onTabKey, true);
+
+  /* ------------------------------------------------------------------ */
+  /* Safety net                                                          */
+  /* If the system focus engine steals Tab and pushes focus out of the   */
+  /* blanks onto a toolbar button, pull it back into the paper.          */
+  /* ------------------------------------------------------------------ */
+  var lastPointerAt = 0;
+  function markPointer() { lastPointerAt = Date.now(); }
+  D.addEventListener('pointerdown', markPointer, true);
+  D.addEventListener('touchstart', markPointer, true);
+  D.addEventListener('mousedown', markPointer, true);
+
+  D.addEventListener('focusout', function (e) {
+    try {
+      if (!kbEditable(e.target)) return;
+      setTimeout(function () {
+        try {
+          if (Date.now() - lastPointerAt < 900) return;   // deliberate tap elsewhere
+          var a = D.activeElement;
+          if (kbEditable(a)) return;                      // landed on another field
+          if (!a || a === D.body || a === D.documentElement) return;
+          kbLog('focus escaped to <' + a.tagName + '> -> pulling back');
+          kbMove(1);
+        } catch (e2) { }
+      }, 0);
+    } catch (err) { }
   }, true);
+
+  try { W.console.log('[xxgg] Tab handler installed (two presses to advance)'); } catch (e) { }
 
   var isTouch = ('ontouchstart' in W) || (W.navigator && W.navigator.maxTouchPoints > 0);
   if (!isTouch) return;
