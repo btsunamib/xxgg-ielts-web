@@ -396,46 +396,111 @@
   /* ------------------------------------------------------------------ */
   /* Fill-in-the-blank: double tap acts like pressing Tab                */
   /* ------------------------------------------------------------------ */
-  function focusNextInput(target) {
+  /* On-screen Tab button: tap it TWICE to move to the next blank        */
+  /* ------------------------------------------------------------------ */
+  var tabBtn = null;
+  var tabTapAt = 0;
+  var tabTimer = null;
+
+  function blanksInScope() {
     try {
-      if (!target || typeof target.closest !== 'function') return false;
-      var input = null;
-      if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA') input = target;
-      else input = target.closest('input, textarea');
-      if (!input) return false;
-      if (input.disabled || input.readOnly) return false;
-
-      // Only inside the exam / reading content, never the header search box.
-      var scope = input.closest('.main-content');
-      if (!scope) return false;
-
+      var scope = D.querySelector('.main-content');
+      if (!scope) return [];
       var all = scope.querySelectorAll('input, textarea');
       var list = [];
       for (var i = 0; i < all.length; i++) {
         var el = all[i];
         if (el.disabled || el.readOnly) continue;
-        var ty = String(el.type || '').toLowerCase();
+        var ty = String(el.type || 'text').toLowerCase();
         if (ty === 'hidden' || ty === 'checkbox' || ty === 'radio' ||
             ty === 'button' || ty === 'submit' || ty === 'reset') continue;
         list.push(el);
       }
-      var idx = list.indexOf(input);
-      if (idx < 0) return false;
+      return list;
+    } catch (e) { return []; }
+  }
 
+  function focusNextBlank() {
+    try {
+      var list = blanksInScope();
+      if (!list.length) return false;
+      var idx = list.indexOf(D.activeElement);
+      if (idx < 0) {
+        try { list[0].focus(); } catch (e) { }
+        try { list[0].scrollIntoView({ block: 'center', behavior: 'smooth' }); } catch (e) { }
+        return true;
+      }
       var next = list[idx + 1];
-      if (!next) return true; // last blank: consume the gesture, do nothing
-
+      if (!next) return true; // already on the last blank
       try { next.focus(); } catch (e) { }
-      try {
-        if (next.scrollIntoView) next.scrollIntoView({ block: 'center', behavior: 'smooth' });
-      } catch (e) { }
+      try { next.scrollIntoView({ block: 'center', behavior: 'smooth' }); } catch (e) { }
       return true;
-    } catch (e) {
-      return false;
-    }
+    } catch (e) { return false; }
+  }
+
+  function resetTabLabel() {
+    try { if (tabBtn) tabBtn.textContent = 'Tab'; } catch (e) { }
+  }
+
+  function onTabTap(ev) {
+    try {
+      if (ev) { ev.preventDefault(); ev.stopPropagation(); }
+      var now = Date.now();
+      if (tabTapAt && (now - tabTapAt) <= 420) {
+        tabTapAt = 0;
+        if (tabTimer) { clearTimeout(tabTimer); tabTimer = null; }
+        resetTabLabel();
+        var moved = focusNextBlank();
+        log('Tab x2 -> ' + (moved ? 'next blank' : 'no blank found'));
+      } else {
+        tabTapAt = now;
+        if (tabBtn) tabBtn.textContent = '\u518d\u70b9\u4e00\u4e0b';
+        if (tabTimer) clearTimeout(tabTimer);
+        tabTimer = setTimeout(function () { tabTimer = null; tabTapAt = 0; resetTabLabel(); }, 900);
+      }
+    } catch (e) { }
+  }
+
+  function ensureTabButton() {
+    try {
+      if (tabBtn && tabBtn.parentNode) return;
+      tabBtn = D.createElement('button');
+      tabBtn.id = 'xxgg-tab-btn';
+      tabBtn.type = 'button';
+      tabBtn.textContent = 'Tab';
+      tabBtn.setAttribute('aria-label', 'Tab to the next blank');
+      tabBtn.setAttribute('style', [
+        'position:fixed', 'right:16px', 'bottom:88px', 'z-index:2147482000',
+        'min-width:76px', 'min-height:52px', 'padding:10px 16px',
+        'border-radius:14px', 'border:1px solid rgba(0,0,0,.18)',
+        'background:rgba(255,255,255,.95)', 'color:#232427',
+        'font:600 15px/1 -apple-system,system-ui,sans-serif',
+        'box-shadow:0 4px 16px rgba(0,0,0,.18)', 'touch-action:manipulation',
+        '-webkit-user-select:none', 'user-select:none', 'display:none'
+      ].join(';'));
+      tabBtn.addEventListener('click', onTabTap, true);
+      (D.body || D.documentElement).appendChild(tabBtn);
+    } catch (e) { }
+  }
+
+  function refreshTabButton() {
+    try {
+      ensureTabButton();
+      if (!tabBtn) return;
+      tabBtn.style.display = blanksInScope().length > 0 ? 'block' : 'none';
+    } catch (e) { }
+  }
+
+  function startTabWatcher() {
+    try {
+      ensureTabButton();
+      refreshTabButton();
+      setInterval(refreshTabButton, 900);
+    } catch (e) { }
   }
 
   D.addEventListener('touchend', function (e) {
+    if (e.target && typeof e.target.closest === 'function' && e.target.closest('#xxgg-tab-btn')) return;
     touchEndCount++;
     var p = touchPoint(e);
     var now = Date.now();
@@ -453,12 +518,6 @@
 
     if (!isDouble) {
       // A plain tap must never build a selection. Let the app close its popup.
-      return;
-    }
-
-    // Fill-in-the-blank: a double tap acts like pressing Tab -> next blank.
-    if (focusNextInput(e.target)) {
-      log('DOUBLE TAP on blank -> focus next input');
       return;
     }
 
@@ -494,6 +553,8 @@
 
   injectCss();
   D.addEventListener('DOMContentLoaded', injectCss);
+
+  startTabWatcher();
 
   W.__xxggTouchSelection = {
     enabled: true,
