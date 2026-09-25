@@ -31,20 +31,48 @@
   if (!D) return;
 
   /* ------------------------------------------------------------------ */
-  /* Keyboard: Tab / Shift+Tab move between the blanks in the exam area  */
+  /* Keyboard: press Tab TWICE to move to the next blank                 */
+  /*                                                                     */
+  /* Deliberately does NOT depend on any container class name - an earlier */
+  /* revision required .main-content and silently let the browser move    */
+  /* focus out of the exam when the input lived elsewhere, which made Tab  */
+  /* useless. Here we always swallow the key while an editable field is    */
+  /* focused, so focus can never escape the paper.                         */
   /* ------------------------------------------------------------------ */
-  function kbBlanks() {
+  var TAB_DOUBLE_MS = 700;
+  var tabPressAt = 0;
+
+  function kbLog(msg) {
+    try { if (typeof log === 'function' && logs) log(msg); } catch (e) { }
+  }
+
+  function kbEditable(el) {
+    if (!el) return false;
+    var tag = el.tagName;
+    if (tag === 'INPUT' || tag === 'TEXTAREA') return true;
+    return el.isContentEditable === true;
+  }
+
+  function kbFields() {
     try {
-      var scope = D.querySelector('.main-content');
-      if (!scope) return [];
-      var all = scope.querySelectorAll('input, textarea');
+      var all = D.querySelectorAll('input, textarea, [contenteditable="true"]');
       var list = [];
       for (var i = 0; i < all.length; i++) {
         var el = all[i];
         if (el.disabled || el.readOnly) continue;
-        var ty = String(el.type || 'text').toLowerCase();
-        if (ty === 'hidden' || ty === 'checkbox' || ty === 'radio' ||
-            ty === 'button' || ty === 'submit' || ty === 'reset') continue;
+        if (el.tagName === 'INPUT') {
+          var ty = String(el.type || 'text').toLowerCase();
+          if (ty === 'hidden' || ty === 'checkbox' || ty === 'radio' ||
+              ty === 'button' || ty === 'submit' || ty === 'reset' ||
+              ty === 'file' || ty === 'range' || ty === 'color') continue;
+        }
+        var r = el.getBoundingClientRect();
+        if (r.width < 8 || r.height < 8) continue;         // not visible
+        if (el.offsetParent === null && !el.isContentEditable) {
+          var cs = null;
+          try { cs = W.getComputedStyle(el); } catch (e) { cs = null; }
+          if (!cs || cs.position !== 'fixed') continue;     // not rendered
+        }
         list.push(el);
       }
       return list;
@@ -53,7 +81,7 @@
 
   function kbMove(dir) {
     try {
-      var list = kbBlanks();
+      var list = kbFields();
       if (!list.length) return false;
       var idx = list.indexOf(D.activeElement);
       var next;
@@ -61,6 +89,7 @@
       else next = list[idx + dir];
       if (!next) return false;
       try { next.focus(); } catch (e) { }
+      try { if (next.select && next.tagName === 'INPUT') next.select(); } catch (e) { }
       try {
         if (next.scrollIntoView) next.scrollIntoView({ block: 'center', behavior: 'smooth' });
       } catch (e) { }
@@ -68,17 +97,40 @@
     } catch (e) { return false; }
   }
 
+  function kbFlash(el) {
+    try {
+      if (!el || !el.style) return;
+      var prev = el.style.boxShadow;
+      el.style.boxShadow = '0 0 0 3px rgba(64,140,255,.85)';
+      setTimeout(function () {
+        try { el.style.boxShadow = prev || ''; } catch (e) { }
+      }, TAB_DOUBLE_MS);
+    } catch (e) { }
+  }
+
   D.addEventListener('keydown', function (e) {
     try {
       var isTab = (e.key === 'Tab') || (e.keyCode === 9) || (e.which === 9);
       if (!isTab) return;
       if (e.ctrlKey || e.metaKey || e.altKey) return;
+
       var a = D.activeElement;
-      if (!a || (a.tagName !== 'INPUT' && a.tagName !== 'TEXTAREA')) return;
-      if (typeof a.closest !== 'function' || !a.closest('.main-content')) return;
+      if (!kbEditable(a)) return;
+
+      // Always swallow Tab while typing, so focus never leaves the paper.
       e.preventDefault();
       e.stopPropagation();
-      kbMove(e.shiftKey ? -1 : 1);
+
+      var now = Date.now();
+      if (tabPressAt && (now - tabPressAt) <= TAB_DOUBLE_MS) {
+        tabPressAt = 0;
+        var moved = kbMove(e.shiftKey ? -1 : 1);
+        kbLog('Tab x2 -> ' + (moved ? 'moved' : 'no next blank'));
+      } else {
+        tabPressAt = now;
+        kbFlash(a);
+        kbLog('Tab #1 armed - press Tab again to move');
+      }
     } catch (err) { }
   }, true);
 
