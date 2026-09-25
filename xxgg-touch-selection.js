@@ -145,6 +145,26 @@
   D.addEventListener('keyup', onTabKey, true);
   D.addEventListener('keypress', onTabKey, true);
 
+  // iPadOS sometimes routes Tab through the system focus engine before the
+  // document sees it. Window capture runs earliest, so listen there too.
+  try {
+    W.addEventListener('keydown', onTabKey, true);
+    W.addEventListener('keyup', onTabKey, true);
+    W.addEventListener('keypress', onTabKey, true);
+  } catch (e) { }
+
+  // Also catch the character-level fallback: some keyboards report Tab as a
+  // control character in beforeinput / input.
+  try {
+    D.addEventListener('beforeinput', function (e) {
+      try {
+        var d = e && e.data;
+        if (d === '\t') { kbLog('beforeinput tab'); onTabKey({ key: 'Tab', keyCode: 9, preventDefault: function () { e.preventDefault(); }, stopPropagation: function () { } }); }
+      } catch (e2) { }
+    }, true);
+  } catch (e) { }
+
+
   /* ------------------------------------------------------------------ */
   /* Safety net                                                          */
   /* If the system focus engine steals Tab and pushes focus out of the   */
