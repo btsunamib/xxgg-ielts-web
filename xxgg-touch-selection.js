@@ -30,6 +30,58 @@
   var D = W.document;
   if (!D) return;
 
+  /* ------------------------------------------------------------------ */
+  /* Keyboard: Tab / Shift+Tab move between the blanks in the exam area  */
+  /* ------------------------------------------------------------------ */
+  function kbBlanks() {
+    try {
+      var scope = D.querySelector('.main-content');
+      if (!scope) return [];
+      var all = scope.querySelectorAll('input, textarea');
+      var list = [];
+      for (var i = 0; i < all.length; i++) {
+        var el = all[i];
+        if (el.disabled || el.readOnly) continue;
+        var ty = String(el.type || 'text').toLowerCase();
+        if (ty === 'hidden' || ty === 'checkbox' || ty === 'radio' ||
+            ty === 'button' || ty === 'submit' || ty === 'reset') continue;
+        list.push(el);
+      }
+      return list;
+    } catch (e) { return []; }
+  }
+
+  function kbMove(dir) {
+    try {
+      var list = kbBlanks();
+      if (!list.length) return false;
+      var idx = list.indexOf(D.activeElement);
+      var next;
+      if (idx < 0) next = dir > 0 ? list[0] : list[list.length - 1];
+      else next = list[idx + dir];
+      if (!next) return false;
+      try { next.focus(); } catch (e) { }
+      try {
+        if (next.scrollIntoView) next.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      } catch (e) { }
+      return true;
+    } catch (e) { return false; }
+  }
+
+  D.addEventListener('keydown', function (e) {
+    try {
+      var isTab = (e.key === 'Tab') || (e.keyCode === 9) || (e.which === 9);
+      if (!isTab) return;
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+      var a = D.activeElement;
+      if (!a || (a.tagName !== 'INPUT' && a.tagName !== 'TEXTAREA')) return;
+      if (typeof a.closest !== 'function' || !a.closest('.main-content')) return;
+      e.preventDefault();
+      e.stopPropagation();
+      kbMove(e.shiftKey ? -1 : 1);
+    } catch (err) { }
+  }, true);
+
   var isTouch = ('ontouchstart' in W) || (W.navigator && W.navigator.maxTouchPoints > 0);
   if (!isTouch) return;
 
@@ -395,112 +447,7 @@
 
   /* ------------------------------------------------------------------ */
   /* Fill-in-the-blank: double tap acts like pressing Tab                */
-  /* ------------------------------------------------------------------ */
-  /* On-screen Tab button: tap it TWICE to move to the next blank        */
-  /* ------------------------------------------------------------------ */
-  var tabBtn = null;
-  var tabTapAt = 0;
-  var tabTimer = null;
-
-  function blanksInScope() {
-    try {
-      var scope = D.querySelector('.main-content');
-      if (!scope) return [];
-      var all = scope.querySelectorAll('input, textarea');
-      var list = [];
-      for (var i = 0; i < all.length; i++) {
-        var el = all[i];
-        if (el.disabled || el.readOnly) continue;
-        var ty = String(el.type || 'text').toLowerCase();
-        if (ty === 'hidden' || ty === 'checkbox' || ty === 'radio' ||
-            ty === 'button' || ty === 'submit' || ty === 'reset') continue;
-        list.push(el);
-      }
-      return list;
-    } catch (e) { return []; }
-  }
-
-  function focusNextBlank() {
-    try {
-      var list = blanksInScope();
-      if (!list.length) return false;
-      var idx = list.indexOf(D.activeElement);
-      if (idx < 0) {
-        try { list[0].focus(); } catch (e) { }
-        try { list[0].scrollIntoView({ block: 'center', behavior: 'smooth' }); } catch (e) { }
-        return true;
-      }
-      var next = list[idx + 1];
-      if (!next) return true; // already on the last blank
-      try { next.focus(); } catch (e) { }
-      try { next.scrollIntoView({ block: 'center', behavior: 'smooth' }); } catch (e) { }
-      return true;
-    } catch (e) { return false; }
-  }
-
-  function resetTabLabel() {
-    try { if (tabBtn) tabBtn.textContent = 'Tab'; } catch (e) { }
-  }
-
-  function onTabTap(ev) {
-    try {
-      if (ev) { ev.preventDefault(); ev.stopPropagation(); }
-      var now = Date.now();
-      if (tabTapAt && (now - tabTapAt) <= 420) {
-        tabTapAt = 0;
-        if (tabTimer) { clearTimeout(tabTimer); tabTimer = null; }
-        resetTabLabel();
-        var moved = focusNextBlank();
-        log('Tab x2 -> ' + (moved ? 'next blank' : 'no blank found'));
-      } else {
-        tabTapAt = now;
-        if (tabBtn) tabBtn.textContent = '\u518d\u70b9\u4e00\u4e0b';
-        if (tabTimer) clearTimeout(tabTimer);
-        tabTimer = setTimeout(function () { tabTimer = null; tabTapAt = 0; resetTabLabel(); }, 900);
-      }
-    } catch (e) { }
-  }
-
-  function ensureTabButton() {
-    try {
-      if (tabBtn && tabBtn.parentNode) return;
-      tabBtn = D.createElement('button');
-      tabBtn.id = 'xxgg-tab-btn';
-      tabBtn.type = 'button';
-      tabBtn.textContent = 'Tab';
-      tabBtn.setAttribute('aria-label', 'Tab to the next blank');
-      tabBtn.setAttribute('style', [
-        'position:fixed', 'right:16px', 'bottom:88px', 'z-index:2147482000',
-        'min-width:76px', 'min-height:52px', 'padding:10px 16px',
-        'border-radius:14px', 'border:1px solid rgba(0,0,0,.18)',
-        'background:rgba(255,255,255,.95)', 'color:#232427',
-        'font:600 15px/1 -apple-system,system-ui,sans-serif',
-        'box-shadow:0 4px 16px rgba(0,0,0,.18)', 'touch-action:manipulation',
-        '-webkit-user-select:none', 'user-select:none', 'display:none'
-      ].join(';'));
-      tabBtn.addEventListener('click', onTabTap, true);
-      (D.body || D.documentElement).appendChild(tabBtn);
-    } catch (e) { }
-  }
-
-  function refreshTabButton() {
-    try {
-      ensureTabButton();
-      if (!tabBtn) return;
-      tabBtn.style.display = blanksInScope().length > 0 ? 'block' : 'none';
-    } catch (e) { }
-  }
-
-  function startTabWatcher() {
-    try {
-      ensureTabButton();
-      refreshTabButton();
-      setInterval(refreshTabButton, 900);
-    } catch (e) { }
-  }
-
   D.addEventListener('touchend', function (e) {
-    if (e.target && typeof e.target.closest === 'function' && e.target.closest('#xxgg-tab-btn')) return;
     touchEndCount++;
     var p = touchPoint(e);
     var now = Date.now();
@@ -553,8 +500,6 @@
 
   injectCss();
   D.addEventListener('DOMContentLoaded', injectCss);
-
-  startTabWatcher();
 
   W.__xxggTouchSelection = {
     enabled: true,
