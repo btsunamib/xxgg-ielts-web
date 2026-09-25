@@ -393,6 +393,48 @@
     return t ? { x: t.clientX, y: t.clientY } : { x: 0, y: 0 };
   }
 
+  /* ------------------------------------------------------------------ */
+  /* Fill-in-the-blank: double tap acts like pressing Tab                */
+  /* ------------------------------------------------------------------ */
+  function focusNextInput(target) {
+    try {
+      if (!target || typeof target.closest !== 'function') return false;
+      var input = null;
+      if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA') input = target;
+      else input = target.closest('input, textarea');
+      if (!input) return false;
+      if (input.disabled || input.readOnly) return false;
+
+      // Only inside the exam / reading content, never the header search box.
+      var scope = input.closest('.main-content');
+      if (!scope) return false;
+
+      var all = scope.querySelectorAll('input, textarea');
+      var list = [];
+      for (var i = 0; i < all.length; i++) {
+        var el = all[i];
+        if (el.disabled || el.readOnly) continue;
+        var ty = String(el.type || '').toLowerCase();
+        if (ty === 'hidden' || ty === 'checkbox' || ty === 'radio' ||
+            ty === 'button' || ty === 'submit' || ty === 'reset') continue;
+        list.push(el);
+      }
+      var idx = list.indexOf(input);
+      if (idx < 0) return false;
+
+      var next = list[idx + 1];
+      if (!next) return true; // last blank: consume the gesture, do nothing
+
+      try { next.focus(); } catch (e) { }
+      try {
+        if (next.scrollIntoView) next.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      } catch (e) { }
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+
   D.addEventListener('touchend', function (e) {
     touchEndCount++;
     var p = touchPoint(e);
@@ -411,6 +453,12 @@
 
     if (!isDouble) {
       // A plain tap must never build a selection. Let the app close its popup.
+      return;
+    }
+
+    // Fill-in-the-blank: a double tap acts like pressing Tab -> next blank.
+    if (focusNextInput(e.target)) {
+      log('DOUBLE TAP on blank -> focus next input');
       return;
     }
 
