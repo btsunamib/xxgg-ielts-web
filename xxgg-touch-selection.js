@@ -112,9 +112,21 @@
 
   function onTabKey(e) {
     try {
-      var isTab = (e.key === 'Tab') || (e.keyCode === 9) || (e.which === 9);
-      if (!isTab) return;
-      if (e.ctrlKey || e.metaKey || e.altKey) return;
+      var name = String(e.key || '');
+      var mods = (e.altKey ? 'A' : '') + (e.ctrlKey ? 'C' : '') + (e.metaKey ? 'M' : '') + (e.shiftKey ? 'S' : '');
+
+      // Diagnostic: log special keys / any key with a modifier so we can see
+      // what iPadOS actually delivers. Letters alone are not logged.
+      if (DEBUG && (name.length > 1 || mods)) {
+        kbLog('key ' + e.type + ' name=' + name + ' code=' + (e.keyCode || e.which) + ' mods=' + (mods || '-'));
+      }
+
+      // iPadOS swallows Tab, so offer modifier combos that DO arrive.
+      var combo = (e.altKey || e.ctrlKey || e.metaKey) &&
+                  (name === 'ArrowDown' || name === 'ArrowRight');
+      var isTab = (name === 'Tab') || (e.keyCode === 9) || (e.which === 9);
+      if (!isTab && !combo) return;
+      if (isTab && (e.ctrlKey || e.metaKey || e.altKey)) return;
 
       var now = Date.now();
       // keydown / keyup / keypress for the SAME press arrive within a few ms.
@@ -127,6 +139,12 @@
 
       e.preventDefault();
       e.stopPropagation();
+
+      if (combo) {
+        kbLog('combo ' + mods + '+' + name + ' -> next blank');
+        kbMove(1);
+        return;
+      }
 
       if (tabPressAt && (now - tabPressAt) <= TAB_DOUBLE_MS) {
         tabPressAt = 0;

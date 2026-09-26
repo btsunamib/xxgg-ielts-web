@@ -224,5 +224,78 @@
   dragCss();
   D.addEventListener('DOMContentLoaded', dragCss);
 
+  /* ------------------------------------------------------------------ */
+  /* Count-up clock for the untimed exam mode                            */
+  /*                                                                     */
+  /* Untimed papers show a static placeholder in the header instead of a  */
+  /* countdown. Watch .exam-header__time-remaining; once its text looks   */
+  /* untimed (or has simply not changed for several seconds) start a      */
+  /* stopwatch from 0 and keep writing MM:SS into it.                     */
+  /* ------------------------------------------------------------------ */
+  var CU_SLOT = '.exam-header__time-remaining';
+  var CU_UNTIMED = /(\u4e0d\u9650|\u4e0d\u8ba1\u65f6|--|\u2014|^\s*$)/;
+  var CU_STATIC_TICKS = 6;
+  var cuActive = false;
+  var cuStatic = 0;
+  var cuLast = '';
+  var cuStartAt = 0;
+
+  function cuKey() {
+    try { return 'xxgg.stopwatch.' + (W.location ? W.location.pathname : 'exam'); }
+    catch (e) { return 'xxgg.stopwatch'; }
+  }
+
+  function cuTarget() {
+    try {
+      var box = D.querySelector(CU_SLOT);
+      if (!box) return null;
+      return box.querySelector('span') || box;
+    } catch (e) { return null; }
+  }
+
+  function cuPad(n) { return (n < 10 ? '0' : '') + n; }
+
+  function cuFormat(sec) {
+    var h = Math.floor(sec / 3600);
+    var m = Math.floor((sec % 3600) / 60);
+    var s = sec % 60;
+    return h > 0 ? (h + ':' + cuPad(m) + ':' + cuPad(s)) : (cuPad(m) + ':' + cuPad(s));
+  }
+
+  function cuTick() {
+    try {
+      var el = cuTarget();
+      if (!el) {
+        // left the exam page
+        cuActive = false; cuStatic = 0; cuLast = '';
+        return;
+      }
+
+      if (!cuActive) {
+        var txt = String(el.textContent || '').trim();
+        if (txt === cuLast) cuStatic++;
+        else { cuStatic = 0; cuLast = txt; }
+
+        if (CU_UNTIMED.test(txt) || cuStatic >= CU_STATIC_TICKS) {
+          cuActive = true;
+          var saved = null;
+          try { saved = W.sessionStorage ? W.sessionStorage.getItem(cuKey()) : null; } catch (e) { saved = null; }
+          cuStartAt = saved ? Number(saved) : Date.now();
+          if (!saved) {
+            try { if (W.sessionStorage) W.sessionStorage.setItem(cuKey(), String(cuStartAt)); } catch (e) { }
+          }
+          if (!cuStartAt || !isFinite(cuStartAt)) cuStartAt = Date.now();
+        }
+        return;
+      }
+
+      var sec = Math.max(0, Math.floor((Date.now() - cuStartAt) / 1000));
+      el.textContent = cuFormat(sec);
+    } catch (e) { }
+  }
+
+  try { setInterval(cuTick, 1000); } catch (e) { }
+  try { setTimeout(cuTick, 800); } catch (e) { }
+
   W.__xxggUiPatch = { hidden: ['ielts-rail-plan-link'] };
 })();
