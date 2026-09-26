@@ -16,7 +16,7 @@
   'use strict';
 
   var cfg = window.__XXGG_WEB_CONFIG__ || {};
-  var APP_NAME = cfg.appName || '九分学长考雅机考平台';
+  var APP_NAME = cfg.appName || '罗学长考雅机考平台';
   var APP_VERSION = cfg.appVersion || '0.9.16-rc.3';
 
   /* --------------------------------------------------------------
