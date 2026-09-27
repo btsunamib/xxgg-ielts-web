@@ -1031,11 +1031,18 @@
           for (i = 0; i < units.length; i++) {
             var u = units[i];
             var s = statusMap[u.unitId];
+            // partNo / partRank MUST survive the pool mapping: the grouping
+            // below keys candidates by IELTS Part. Dropping them collapses
+            // every unit into a single "Part 99" group.
+            var upn = str(u.partNo !== undefined && u.partNo !== null ? u.partNo : '');
             pool.push({
               unitId: u.unitId,
               titleEn: u.titleEn,
               titleZh: u.titleZh,
               channel: u.channel || channel,
+              partNo: upn,
+              partRank: u.partRank !== undefined && u.partRank !== null
+                ? u.partRank : partRank(upn),
               avgPct: s && s.averageAccuracy !== null && s.averageAccuracy !== undefined
                 ? s.averageAccuracy : 50,
               done: isUnitDone(u.unitId, statusMap)
@@ -1060,7 +1067,10 @@
 
           // Group by IELTS Part and take exactly ONE passage per Part, so a
           // paper can never contain e.g. three Part 3 passages.
-          var usable = primary.length ? primary : pool;
+          // Fall back to `secondary` (which still honours `exclude`) before
+          // the raw pool, otherwise a re-compose may re-pick excluded parts.
+          var usable = primary.length ? primary : secondary;
+          if (!usable.length) usable = pool;
           var groups = {};
           for (i = 0; i < usable.length; i++) {
             var it = usable[i];
@@ -1100,6 +1110,8 @@
           }
 
           chosen.sort(function (x, y) { return (x.partRank || 99) - (y.partRank || 99); });
+          // Never emit more slots than the paper asks for (reading = 3).
+          chosen = chosen.slice(0, need);
 
           var slots = [];
           for (i = 0; i < chosen.length; i++) {
