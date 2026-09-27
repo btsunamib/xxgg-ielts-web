@@ -297,5 +297,164 @@
   try { setInterval(cuTick, 1000); } catch (e) { }
   try { setTimeout(cuTick, 800); } catch (e) { }
 
+  /* ------------------------------------------------------------------ */
+  /* Layout memory: pane width + scroll positions                        */
+  /*                                                                     */
+  /* Generic on purpose - it observes what the app actually renders       */
+  /* instead of relying on internal state.                                */
+  /*   - pane width: poll the sidebar element, save, re-apply on return   */
+  /*   - scroll: capture-phase scroll listener keyed by page + element    */
+  /* ------------------------------------------------------------------ */
+  var SB_SEL = 'aside.ielts-sb, .ielts-sb';
+  var W_KEY = 'xxgg.ui.sbWidth';
+  var S_KEY = 'xxgg.ui.scroll.v1';
+
+  var sbSaved = 0;
+  var sbLast = 0;
+  var sbWasResizing = false;
+
+  function sbRead() {
+    try {
+      var el = D.querySelector(SB_SEL);
+      if (!el) return { el: null, w: 0 };
+      return { el: el, w: Math.round(el.getBoundingClientRect().width) };
+    } catch (e) { return { el: null, w: 0 }; }
+  }
+
+  function sbPersist(w) {
+    try {
+      if (!w) return;
+      sbLast = w;
+      W.localStorage.setItem(W_KEY, String(w));
+    } catch (e) { }
+  }
+
+  function sbApply() {
+    try {
+      var r = sbRead();
+      if (!r.el || !sbSaved) return;
+      if (Math.abs(r.w - sbSaved) <= 3) return;
+      r.el.style.width = sbSaved + 'px';
+      r.el.style.flexBasis = sbSaved + 'px';
+      r.el.style.flexGrow = '0';
+      r.el.style.flexShrink = '0';
+    } catch (e) { }
+  }
+
+  function sbSync() {
+    try {
+      var r = sbRead();
+      if (!r.el) return;
+      var resizing = r.el.classList && r.el.classList.contains('is-resizing');
+      if (resizing) {
+        sbWasResizing = true;
+        sbLast = r.w;
+        return;
+      }
+      if (sbWasResizing) {
+        sbWasResizing = false;
+        sbPersist(r.w);
+        return;
+      }
+      if (sbSaved && Math.abs(r.w - sbSaved) > 3) { sbApply(); return; }
+      if (r.w && Math.abs(r.w - sbLast) >= 2) sbPersist(r.w);
+    } catch (e) { }
+  }
+
+  /* ---------------- scroll memory ---------------- */
+  var scrollMap = {};
+
+  function sLoad() {
+    try {
+      scrollMap = JSON.parse(W.localStorage.getItem(S_KEY) || '{}') || {};
+    } catch (e) { scrollMap = {}; }
+  }
+
+  function sSave() {
+    try { W.localStorage.setItem(S_KEY, JSON.stringify(scrollMap)); } catch (e) { }
+  }
+
+  function pageKey() {
+    try { return String(W.location.pathname + W.location.search).slice(0, 220); }
+    catch (e) { return 'x'; }
+  }
+
+  function elKey(el) {
+    try {
+      if (!el || el === D || el === D.documentElement || el === D.body) return 'win';
+      var tag = String(el.tagName || '').toLowerCase();
+      var cls = String(el.className || '').split(/\s+/).filter(Boolean).slice(0, 2).join('.');
+      var base = (el.id ? ('#' + el.id) : (tag + (cls ? '.' + cls : '')));
+      var idx = 0;
+      var parent = el.parentElement;
+      if (parent) {
+        var kids = parent.children;
+        for (var i = 0; i < kids.length; i++) {
+          if (kids[i] === el) break;
+          if (kids[i].tagName === el.tagName) idx++;
+        }
+      }
+      return base + ':' + idx;
+    } catch (e) { return ''; }
+  }
+
+  var sTimer = null;
+  function sScheduleSave() {
+    if (sTimer) return;
+    sTimer = setTimeout(function () { sTimer = null; sSave(); }, 400);
+  }
+
+  D.addEventListener('scroll', function (e) {
+    try {
+      var el = e.target;
+      if (el === D) el = null;              // document scroll -> window
+      var k = pageKey() + '|' + elKey(el);
+      var top = el ? el.scrollTop : (W.pageYOffset || 0);
+      var left = el ? el.scrollLeft : (W.pageXOffset || 0);
+      if (top < 0) top = 0;
+      scrollMap[k] = { t: Math.round(top), l: Math.round(left), at: Date.now() };
+      sScheduleSave();
+    } catch (err) { }
+  }, true);
+
+  function sRestore() {
+    try {
+      var prefix = pageKey() + '|';
+      var all = D.querySelectorAll('*');
+      var applied = 0;
+      for (var i = 0; i < all.length && applied < 40; i++) {
+        var el = all[i];
+        if (el.scrollHeight <= el.clientHeight + 4 && el.scrollWidth <= el.clientWidth + 4) continue;
+        var v = scrollMap[prefix + elKey(el)];
+        if (!v) continue;
+        if (typeof v.t === 'number' && Math.abs(el.scrollTop - v.t) > 2) el.scrollTop = v.t;
+        if (typeof v.l === 'number' && Math.abs(el.scrollLeft - v.l) > 2) el.scrollLeft = v.l;
+        applied++;
+      }
+      var wv = scrollMap[prefix + 'win'];
+      if (wv && typeof wv.t === 'number' && Math.abs((W.pageYOffset || 0) - wv.t) > 2) {
+        W.scrollTo(wv.l || 0, wv.t);
+      }
+    } catch (e) { }
+  }
+
+  function bootMemory() {
+    try {
+      sLoad();
+      sbSaved = Number(W.localStorage.getItem(W_KEY) || 0) || 0;
+      sbApply();
+      sRestore();
+      if (!bootMemory._t) {
+        bootMemory._t = setInterval(function () { sbSync(); }, 700);
+      }
+      setTimeout(sRestore, 700);
+      setTimeout(sRestore, 1800);
+      setTimeout(sRestore, 3500);
+    } catch (e) { }
+  }
+
+  bootMemory();
+  D.addEventListener('DOMContentLoaded', bootMemory);
+
   W.__xxggUiPatch = { hidden: ['ielts-rail-plan-link'] };
 })();
