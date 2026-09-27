@@ -510,5 +510,116 @@
   bootMemory();
   D.addEventListener('DOMContentLoaded', bootMemory);
 
-  W.__xxggUiPatch = { hidden: ['ielts-rail-plan-link'] };
+  /* ------------------------------------------------------------------ */
+  /* Unlock: high-frequency "load more rows"                             */
+  /*                                                                     */
+  /* The renderer only paints the "加载更多排名" pill when the account has  */
+  /* the high_frequency_more_rows feature, otherwise it paints the        */
+  /* "显示更多排名（权限功能）" hint card in the same slot.                 */
+  /*                                                                     */
+  /* Instead of editing the minified bundle we rewrite that one field at  */
+  /* the fetch layer, so the real rows request still goes out and we can  */
+  /* see whether the server honours it.                                   */
+  /*                                                                     */
+  /* The row cap may also live on the server: the albums payload carries  */
+  /* publicRowLimit / maxDisplayRows. If the server enforces the          */
+  /* entitlement, the rows call answers with business code                */
+  /* HIGH_FREQUENCY_MORE_ROWS_ENTITLEMENT_REQUIRED and the surface falls  */
+  /* back to the hint card on its own (that is the honest signal).        */
+  /*                                                                     */
+  /* Set MORE_ROWS_UNLOCK to false to disable.                            */
+  /* ------------------------------------------------------------------ */
+  var MORE_ROWS_UNLOCK = true;
+  var ENT_PATH = '/practice/v1/me/feature-entitlements';
+  var ENT_FEATURE = 'high_frequency_more_rows';
+  var entLogged = false;
+
+  function entApply(container) {
+    if (!container || typeof container !== 'object') return false;
+    var changed = false;
+    try {
+      var ent = container.entitlements;
+      if (!ent || typeof ent !== 'object' || Array.isArray(ent)) {
+        ent = {};
+        container.entitlements = ent;
+      }
+      if (ent[ENT_FEATURE] !== true) { ent[ENT_FEATURE] = true; changed = true; }
+
+      var feats = container.features;
+      if (!feats || typeof feats.length !== 'number') { feats = []; container.features = feats; }
+      var hit = false;
+      for (var i = 0; i < feats.length; i++) {
+        var f = feats[i];
+        if (!f || typeof f !== 'object') continue;
+        var code = f.featureCode || f.code || f.feature || f.name;
+        if (String(code || '') === ENT_FEATURE) {
+          hit = true;
+          if (f.enabled !== true) { f.enabled = true; changed = true; }
+        }
+      }
+      if (!hit) {
+        feats.push({ featureCode: ENT_FEATURE, enabled: true });
+        changed = true;
+      }
+    } catch (e) { }
+    return changed;
+  }
+
+  // The request layer unwraps { code, data } before the caller sees it, but
+  // the entitlement parser also tolerates { result } / a bare payload, so
+  // patch every shape that could reach it.
+  function entForce(payload) {
+    if (!payload || typeof payload !== 'object') return false;
+    var changed = entApply(payload);
+    if (entApply(payload.data)) changed = true;
+    if (entApply(payload.result)) changed = true;
+    return changed;
+  }
+
+  function entInstall() {
+    try {
+      if (!MORE_ROWS_UNLOCK || !W.fetch || W.fetch.__xxggMoreRows) return;
+      if (typeof W.Response !== 'function') return;
+      var inner = W.fetch.bind(W);
+
+      var wrapped = function (input, init) {
+        var url = '';
+        try { url = typeof input === 'string' ? input : ((input && input.url) || ''); }
+        catch (e) { url = ''; }
+
+        var out = inner(input, init);
+        if (url.indexOf(ENT_PATH) === -1) return out;
+
+        return out.then(function (res) {
+          try {
+            if (!res || typeof res.clone !== 'function') return res;
+            return res.clone().text().then(function (txt) {
+              var body = null;
+              try { body = JSON.parse(txt); } catch (e) { return res; }
+              if (!body || typeof body !== 'object') return res;
+              if (!entForce(body)) return res;
+              if (!entLogged) {
+                entLogged = true;
+                console.info('[xxgg-ui-patch] high_frequency_more_rows forced on');
+              }
+              return new W.Response(JSON.stringify(body), {
+                status: res.status,
+                statusText: res.statusText,
+                headers: res.headers
+              });
+            }).catch(function () { return res; });
+          } catch (e) { return res; }
+        });
+      };
+
+      wrapped.__xxggMoreRows = true;
+      W.fetch = wrapped;
+    } catch (e) { }
+  }
+
+  entInstall();
+  D.addEventListener('DOMContentLoaded', entInstall);
+  try { setTimeout(entInstall, 400); } catch (e) { }
+
+  W.__xxggUiPatch = { hidden: ['ielts-rail-plan-link'], moreRowsUnlock: MORE_ROWS_UNLOCK };
 })();
