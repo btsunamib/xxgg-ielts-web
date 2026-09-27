@@ -276,7 +276,7 @@
         if (txt === cuLast) cuStatic++;
         else { cuStatic = 0; cuLast = txt; }
 
-        if (CU_UNTIMED.test(txt) || cuStatic >= CU_STATIC_TICKS) {
+        if (CU_UNTIMED.test(txt)) {
           cuActive = true;
           var saved = null;
           try { saved = W.sessionStorage ? W.sessionStorage.getItem(cuKey()) : null; } catch (e) { saved = null; }
@@ -329,6 +329,39 @@
     } catch (e) { }
   }
 
+  var SB_STYLE_ID = 'xxgg-sbw-css';
+
+  // Tag every ancestor of the aside so a stylesheet rule can reach whichever
+  // element the app defines --sb-w on.
+  function sbTag(el) {
+    try {
+      var node = el;
+      var guard = 0;
+      while (node && node.setAttribute && guard++ < 16) {
+        node.setAttribute('data-xxgg-sb', '1');
+        if (node === D.documentElement) break;
+        node = node.parentElement;
+      }
+    } catch (e) { }
+  }
+
+  // An author-stylesheet !important declaration beats a normal inline style,
+  // and Vue rewrites the whole style attribute on re-render - so pin the
+  // variable from a stylesheet instead of writing it inline.
+  function sbPin(w) {
+    try {
+      var st = D.getElementById(SB_STYLE_ID);
+      if (!st) {
+        st = D.createElement('style');
+        st.id = SB_STYLE_ID;
+        (D.head || D.documentElement).appendChild(st);
+      }
+      st.textContent = w
+        ? '[data-xxgg-sb]{--sb-w:' + w + 'px !important;}'
+        : '';
+    } catch (e) { }
+  }
+
   function sbApply(force) {
     try {
       var r = sbRead();
@@ -337,22 +370,8 @@
       // Do not fight a genuinely narrow viewport (split view / small window).
       if (W.innerWidth && W.innerWidth < sbSaved + 220) return;
       if (!force && Math.abs(r.w - sbSaved) <= 3) return;
-
-      var px = sbSaved + 'px';
-      // The layout reads the --sb-w custom property, not an inline width, so
-      // set it on the aside and on every ancestor (the nearest one wins).
-      var node = r.el;
-      var guard = 0;
-      while (node && node.style && guard++ < 14) {
-        try { node.style.setProperty('--sb-w', px); } catch (e) { }
-        if (node === D.documentElement) break;
-        node = node.parentElement;
-      }
-      // Belt and braces for layouts that also honour a plain width.
-      r.el.style.width = px;
-      r.el.style.flexBasis = px;
-      r.el.style.flexGrow = '0';
-      r.el.style.flexShrink = '0';
+      sbTag(r.el);
+      sbPin(sbSaved);
     } catch (e) { }
   }
 
@@ -360,8 +379,11 @@
     try {
       var r = sbRead();
       if (!r.el) return;
+      sbTag(r.el);
       var resizing = r.el.classList && r.el.classList.contains('is-resizing');
       if (resizing) {
+        // Release the pin while dragging, otherwise the user cannot resize.
+        if (!sbWasResizing) sbPin(0);
         sbWasResizing = true;
         sbLast = r.w;
         return;
@@ -369,10 +391,11 @@
       if (sbWasResizing) {
         sbWasResizing = false;
         sbPersist(r.w);
+        sbPin(r.w);
         return;
       }
       if (sbSaved && Math.abs(r.w - sbSaved) > 3) { sbApply(); return; }
-      if (r.w && Math.abs(r.w - sbLast) >= 2) sbPersist(r.w);
+      if (r.w && Math.abs(r.w - sbLast) >= 2) { sbPersist(r.w); sbPin(r.w); }
     } catch (e) { }
   }
 
