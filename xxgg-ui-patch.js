@@ -329,13 +329,28 @@
     } catch (e) { }
   }
 
-  function sbApply() {
+  function sbApply(force) {
     try {
       var r = sbRead();
       if (!r.el || !sbSaved) return;
-      if (Math.abs(r.w - sbSaved) <= 3) return;
-      r.el.style.width = sbSaved + 'px';
-      r.el.style.flexBasis = sbSaved + 'px';
+      if (sbSaved < 120) return;
+      // Do not fight a genuinely narrow viewport (split view / small window).
+      if (W.innerWidth && W.innerWidth < sbSaved + 220) return;
+      if (!force && Math.abs(r.w - sbSaved) <= 3) return;
+
+      var px = sbSaved + 'px';
+      // The layout reads the --sb-w custom property, not an inline width, so
+      // set it on the aside and on every ancestor (the nearest one wins).
+      var node = r.el;
+      var guard = 0;
+      while (node && node.style && guard++ < 14) {
+        try { node.style.setProperty('--sb-w', px); } catch (e) { }
+        if (node === D.documentElement) break;
+        node = node.parentElement;
+      }
+      // Belt and braces for layouts that also honour a plain width.
+      r.el.style.width = px;
+      r.el.style.flexBasis = px;
       r.el.style.flexGrow = '0';
       r.el.style.flexShrink = '0';
     } catch (e) { }
@@ -452,6 +467,22 @@
       setTimeout(sRestore, 3500);
     } catch (e) { }
   }
+
+  function sbSaveNow() {
+    try { var r = sbRead(); if (r.w) sbPersist(r.w); sSave(); } catch (e) { }
+  }
+
+  // iOS suspends timers in the background, so save on the way out and
+  // re-apply when the page becomes visible again.
+  D.addEventListener('visibilitychange', function () {
+    if (D.hidden) { sbSaveNow(); return; }
+    setTimeout(function () { sbApply(true); }, 80);
+    setTimeout(function () { sbApply(true); }, 500);
+    setTimeout(function () { sbApply(true); sRestore(); }, 1400);
+  });
+  try { W.addEventListener('pagehide', sbSaveNow); } catch (e) { }
+  try { W.addEventListener('focus', function () { setTimeout(function () { sbApply(true); }, 150); }); } catch (e) { }
+  D.addEventListener('resize', function () { setTimeout(function () { sbApply(true); }, 250); });
 
   bootMemory();
   D.addEventListener('DOMContentLoaded', bootMemory);
