@@ -46,32 +46,52 @@
   /* strings, so patch text nodes (and a few attributes) at runtime and   */
   /* re-apply whenever Vue re-renders.                                    */
   /* ------------------------------------------------------------------ */
-  var FROM = '\u4e5d\u5206\u5b66\u957f';
-  var TO = '\u7f57\u5b66\u957f';
+// Every vendor name the UI can still be holding, mapped to the new brand.
+  // The minified bundle ships 九分学长; the preload and the static HTML used to
+  // carry 罗学长. Both collapse to the current name.
+  var RENAMES = [
+    ['\u4e5d\u5206\u5b66\u957f', '\u7f57\u5f1f'],
+    ['\u7f57\u5b66\u957f', '\u7f57\u5f1f']
+  ];
   var RENAME_ATTRS = ['title', 'aria-label', 'alt', 'placeholder', 'content'];
+
+  function hasRename(s) {
+    if (!s) return false;
+    var t = String(s);
+    for (var i = 0; i < RENAMES.length; i++) {
+      if (t.indexOf(RENAMES[i][0]) !== -1) return true;
+    }
+    return false;
+  }
+
+  function applyRenames(s) {
+    var out = String(s == null ? '' : s);
+    for (var i = 0; i < RENAMES.length; i++) {
+      if (out.indexOf(RENAMES[i][0]) !== -1) {
+        out = out.split(RENAMES[i][0]).join(RENAMES[i][1]);
+      }
+    }
+    return out;
+  }
 
   function renameIn(el) {
     try {
       if (!el) return;
       if (el.nodeType === 3) {
-        if (el.nodeValue && el.nodeValue.indexOf(FROM) !== -1) {
-          el.nodeValue = el.nodeValue.split(FROM).join(TO);
-        }
+        if (hasRename(el.nodeValue)) el.nodeValue = applyRenames(el.nodeValue);
         return;
       }
       var walker = D.createTreeWalker(el, NodeFilter.SHOW_TEXT, null);
       var n;
       while ((n = walker.nextNode())) {
-        if (n.nodeValue && n.nodeValue.indexOf(FROM) !== -1) {
-          n.nodeValue = n.nodeValue.split(FROM).join(TO);
-        }
+        if (hasRename(n.nodeValue)) n.nodeValue = applyRenames(n.nodeValue);
       }
       var all = el.querySelectorAll ? el.querySelectorAll('*') : [];
-      for (var i = 0; i < all.length; i++) {
+      for (var j = 0; j < all.length; j++) {
         for (var a = 0; a < RENAME_ATTRS.length; a++) {
-          var v = all[i].getAttribute && all[i].getAttribute(RENAME_ATTRS[a]);
-          if (v && v.indexOf(FROM) !== -1) {
-            all[i].setAttribute(RENAME_ATTRS[a], v.split(FROM).join(TO));
+          var v = all[j].getAttribute && all[j].getAttribute(RENAME_ATTRS[a]);
+          if (hasRename(v)) {
+            all[j].setAttribute(RENAME_ATTRS[a], applyRenames(v));
           }
         }
       }
@@ -80,9 +100,7 @@
 
   function renameTitle() {
     try {
-      if (D.title && D.title.indexOf(FROM) !== -1) {
-        D.title = D.title.split(FROM).join(TO);
-      }
+      if (hasRename(D.title)) D.title = applyRenames(D.title);
     } catch (e) { }
   }
 
