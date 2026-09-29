@@ -50,8 +50,8 @@
   // The minified bundle ships 九分学长; the preload and the static HTML used to
   // carry 罗学长. Both collapse to the current name.
   var RENAMES = [
-    ['\u4e5d\u5206\u5b66\u957f', '\u7f57\u5f1f'],
-    ['\u7f57\u5b66\u957f', '\u7f57\u5f1f']
+    ['\u4e5d\u5206\u5b66\u957f', '\u7f57\u5b66\u5f1f'],
+    ['\u7f57\u5b66\u957f', '\u7f57\u5b66\u5f1f']
   ];
   var RENAME_ATTRS = ['title', 'aria-label', 'alt', 'placeholder', 'content'];
 
