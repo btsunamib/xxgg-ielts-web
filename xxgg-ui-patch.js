@@ -594,6 +594,82 @@
     return changed;
   }
 
+  /* ------------------------------------------------------------------ */
+  /* Diagnostics for the "load more rows" attempt                        */
+  /*                                                                     */
+  /* Turning the client gate on is only half the story: the SERVER can    */
+  /* still refuse /practice/.../slots/<key>/rows. Without this the app     */
+  /* just swaps the button back for the permission card and the reason     */
+  /* stays invisible. This prints the real outcome and shows it in a       */
+  /* small toast so the failure is never silent.                          */
+  /*                                                                     */
+  /* Set ROWS_DIAG to false (or delete this block) once settled.           */
+  /* ------------------------------------------------------------------ */
+  var ROWS_DIAG = true;
+  var diagShown = false;
+
+  function showToast(text, ms) {
+    try {
+      if (!ROWS_DIAG) return;
+      var host = D.body || D.documentElement;
+      if (!host) return;
+      var el = D.getElementById('xxgg-diag-toast');
+      if (!el) {
+        el = D.createElement('div');
+        el.id = 'xxgg-diag-toast';
+        el.setAttribute('style', [
+          'position:fixed', 'right:14px', 'bottom:14px', 'z-index:2147483647',
+          'max-width:480px', 'padding:10px 12px', 'border-radius:8px',
+          'background:rgba(20,20,24,.92)', 'color:#fff',
+          'font:12px/1.55 ui-monospace,Menlo,Consolas,monospace',
+          'white-space:pre-wrap', 'word-break:break-all',
+          'box-shadow:0 6px 24px rgba(0,0,0,.35)', 'pointer-events:none'
+        ].join(';'));
+        host.appendChild(el);
+      }
+      el.textContent = String(text);
+      el.style.display = 'block';
+      if (showToast._t) clearTimeout(showToast._t);
+      showToast._t = setTimeout(function () {
+        try { el.style.display = 'none'; } catch (e) { }
+      }, ms || 25000);
+    } catch (e) { }
+  }
+
+  function rowsUrl(url) {
+    return url.indexOf('/high-frequency/') !== -1 &&
+      url.indexOf('/slots/') !== -1 &&
+      url.indexOf('/rows') !== -1;
+  }
+
+  function reportRows(status, body) {
+    var env = (body && typeof body === 'object') ? body : {};
+    var d = env.data !== undefined ? env.data : env.result;
+    var list = [];
+    if (Array.isArray(d)) list = d;
+    else if (d && typeof d === 'object') list = d.list || d.rows || d.records || [];
+    var code = env.code !== undefined ? env.code : env.businessCode;
+
+    var text = 'rows: HTTP ' + status + '  code=' + String(code === undefined ? '?' : code) +
+      '  rows=' + (Array.isArray(list) ? list.length : '?');
+    if (d && typeof d === 'object' && !Array.isArray(d)) {
+      if (d.totalCount !== undefined) text += '  totalCount=' + d.totalCount;
+      if (d.maxDisplayRows !== undefined) text += '  maxDisplayRows=' + d.maxDisplayRows;
+      if (d.hasMore !== undefined) text += '  hasMore=' + d.hasMore;
+    }
+    var msg = env.msg || env.message || env.businessReason || '';
+    if (msg) text += '\n' + String(msg).slice(0, 220);
+
+    try { console.info('[xxgg-ui-patch] ' + text.replace(/\n/g, ' | ')); } catch (e) { }
+
+    var codeStr = String(code === undefined ? '' : code);
+    var bad = status >= 400 || (codeStr !== '' && codeStr !== '200' && codeStr !== '0');
+    if (bad || /rows=0\b/.test(text)) {
+      diagShown = true;
+      showToast(text);
+    }
+  }
+
   function entInstall() {
     try {
       if (!MORE_ROWS_UNLOCK || !W.fetch || W.fetch.__xxggMoreRows) return;
@@ -606,7 +682,21 @@
         catch (e) { url = ''; }
 
         var out = inner(input, init);
-        if (url.indexOf(ENT_PATH) === -1) return out;
+
+        if (url.indexOf(ENT_PATH) === -1) {
+          if (ROWS_DIAG && rowsUrl(url)) {
+            return out.then(function (res) {
+              try {
+                if (!res || typeof res.clone !== 'function') return res;
+                return res.clone().json().then(function (body) {
+                  reportRows(res.status, body);
+                  return res;
+                }, function () { return res; });
+              } catch (e) { return res; }
+            });
+          }
+          return out;
+        }
 
         return out.then(function (res) {
           try {
@@ -619,6 +709,9 @@
               if (!entLogged) {
                 entLogged = true;
                 console.info('[xxgg-ui-patch] high_frequency_more_rows forced on');
+                if (ROWS_DIAG && !diagShown) {
+                  showToast('更多排名：已强制开启 high_frequency_more_rows\n点「加载更多排名」后这里会显示服务端返回。', 8000);
+                }
               }
               return new W.Response(JSON.stringify(body), {
                 status: res.status,
@@ -639,5 +732,9 @@
   D.addEventListener('DOMContentLoaded', entInstall);
   try { setTimeout(entInstall, 400); } catch (e) { }
 
-  W.__xxggUiPatch = { hidden: ['ielts-rail-plan-link'], moreRowsUnlock: MORE_ROWS_UNLOCK };
+  W.__xxggUiPatch = {
+    hidden: ['ielts-rail-plan-link'],
+    moreRowsUnlock: MORE_ROWS_UNLOCK,
+    rowsDiag: ROWS_DIAG
+  };
 })();
