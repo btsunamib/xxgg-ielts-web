@@ -1406,6 +1406,11 @@
       var b = isPlainObject(body) ? body : {};
       var comp = getComposition(id);
       if (!comp) {
+        lsSet('xxgg.compose.lastSubmit', JSON.stringify({
+          at: nowIso(), channel: '', ok: false, phase: 'no-composition',
+          detail: '\u672c\u5730\u627e\u4e0d\u5230\u8fd9\u4efd\u7ec4\u5377\u8bb0\u5f55\uff08compositionId=' + id +
+            '\uff09\u3002\u8bf7\u91cd\u65b0\u7ec4\u5377\u540e\u518d\u8bd5\u3002'
+        }));
         return fail('MIXED_PRACTICE_COMPOSITION_NOT_FOUND', 500);
       }
       var channel = normalizeChannel(b.channel) || normalizeChannel(comp.channel) || 'reading';
@@ -1438,6 +1443,18 @@
         }
 
         if (!order.length) {
+          var shape = '';
+          try {
+            var sp = unknown[0] || submitted[0] || {};
+            shape = '  \u9996\u4e2a\u7bc7\u76ee id=' + str(sp.id) + ' partId=' + str(sp.partId) +
+              ' keys=' + Object.keys(sp).slice(0, 10).join(',');
+          } catch (e) { shape = ''; }
+          lsSet('xxgg.compose.lastSubmit', JSON.stringify({
+            at: nowIso(), channel: channel, ok: false, phase: 'no-unit',
+            detail: '\u63d0\u4ea4\u7684 ' + submitted.length +
+              ' \u4e2a\u7bc7\u76ee\u4e00\u4e2a\u90fd\u6ca1\u80fd\u6620\u5c04\u56de\u5355\u5143\uff08\u672a\u8bc6\u522b ' +
+              unknown.length + ' \u4e2a\uff09\u3002' + shape
+          }));
           return fail('MIXED_PRACTICE_NOT_ENOUGH_PARTS', 500);
         }
 
