@@ -1559,7 +1559,7 @@
             }
             if (refused) {
               return jsonResponse({
-                code: '401',
+                code: 'MIXED_PRACTICE_ENTITLEMENT_REQUIRED',
                 msg: 'MIXED_PRACTICE_ENTITLEMENT_REQUIRED',
                 data: {
                   error: 'MIXED_PRACTICE_ENTITLEMENT_REQUIRED',
@@ -1567,7 +1567,7 @@
                   upstreamError: str(refused.dataError),
                   upstreamMsg: str(refused.msg).slice(0, 200)
                 }
-              }, 200);
+              }, 403);
             }
             return fail('MIXED_PRACTICE_RUNTIME_NOT_READY', 500);
           }
@@ -1832,14 +1832,15 @@
     return lines.join('\n');
   }
 
-  // The one body the app treats as a benign entitlement state rather than an
-  // expired session (see the client's xw()/Ew() guards).
+  // Permission errors must not look like an expired login. The client's old
+  // 401 exception only covered POST attempts, so using it for a GET review or
+  // another mixed route cleared the session and redirected to the catalogue.
   function entitlementOnlyResponse() {
     return jsonResponse({
-      code: '401',
+      code: 'MIXED_PRACTICE_ENTITLEMENT_REQUIRED',
       msg: 'MIXED_PRACTICE_ENTITLEMENT_REQUIRED',
       data: { error: 'MIXED_PRACTICE_ENTITLEMENT_REQUIRED' }
-    }, 200);
+    }, 403);
   }
 
   function neutraliseMixedAuth(res) {
