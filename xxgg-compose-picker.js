@@ -94,7 +94,17 @@
     return null;
   }
 
-  var BTN = 'all:unset;cursor:pointer;padding:5px 10px;border-radius:8px;border:1px solid #d9d9d9;background:#fafafa;color:#222;font-size:12px;text-align:center;';
+  // Styled with the app's own design tokens so the panel reads as part of the
+  // product rather than a bolt-on. Fallbacks match :root in the app bundle.
+  var BTN = 'all:unset;box-sizing:border-box;cursor:pointer;padding:6px 12px;border-radius:6px;' +
+    'border:1px solid var(--color-border-light,#e0e0e0);background:transparent;' +
+    'color:var(--color-text-secondary,#666);font-size:12px;font-weight:600;line-height:1;' +
+    'text-align:center;transition:background .12s,color .12s,border-color .12s;';
+  var BTN_ON = 'background:var(--accent,#3a6ea8);color:#fff;border-color:var(--accent,#3a6ea8);';
+  var SURFACE = 'var(--wc-menu-bg,#fff)';
+  var SURFACE_FG = 'var(--wc-menu-fg,#232427)';
+  var SURFACE_MUTED = 'var(--wc-menu-fg-muted,#71727a)';
+  var LINE = 'var(--wc-menu-border,#e8e8e9)';
 
   /* ------------------------------------------------------------------ */
   /* shell                                                               */
@@ -105,33 +115,33 @@
     host.id = 'xxgg-cp';
     host.setAttribute('style',
       'position:fixed;left:14px;bottom:14px;z-index:2147482000;display:flex;' +
-      'flex-direction:column;align-items:flex-start;gap:8px;' +
-      'font:13px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif;');
+      'flex-direction:column;align-items:flex-start;gap:8px;font-size:13px;line-height:1.5;');
 
     host.innerHTML =
-      '<div id="xxgg-cp-panel" style="display:none;width:330px;max-height:70vh;flex-direction:column;' +
-        'background:#fff;color:#111;border:1px solid #e3e3e3;border-radius:12px;' +
-        'box-shadow:0 10px 34px rgba(0,0,0,.22);overflow:hidden;">' +
-        '<div style="display:flex;align-items:center;gap:8px;padding:10px 12px;border-bottom:1px solid #eee;">' +
-          '<strong style="flex:1;font-size:13px;">' + T.title + '</strong>' +
-          '<button id="xxgg-cp-close" type="button" style="all:unset;cursor:pointer;color:#999;padding:0 4px;">' + T.close + '</button>' +
+      '<div id="xxgg-cp-panel" style="display:none;width:320px;max-height:70vh;flex-direction:column;' +
+        'background:' + SURFACE + ';color:' + SURFACE_FG + ';border:1px solid ' + LINE + ';border-radius:8px;' +
+        'box-shadow:0 8px 28px rgba(0,0,0,.14);overflow:hidden;">' +
+        '<div style="display:flex;align-items:center;gap:8px;padding:10px 12px;border-bottom:1px solid ' + LINE + ';">' +
+          '<strong style="flex:1;font-size:13px;font-weight:600;">' + T.title + '</strong>' +
+          '<button id="xxgg-cp-close" type="button" style="all:unset;cursor:pointer;color:' + SURFACE_MUTED + ';padding:0 4px;font-size:13px;">' + T.close + '</button>' +
         '</div>' +
         '<div id="xxgg-cp-tabs" style="display:flex;gap:6px;padding:10px 12px 0;"></div>' +
         '<div style="padding:8px 12px;display:flex;align-items:center;gap:10px;">' +
-          '<label style="display:flex;align-items:center;gap:6px;cursor:pointer;">' +
+          '<label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:12px;">' +
             '<input id="xxgg-cp-enable" type="checkbox">' + T.enable + '</label>' +
-          '<span id="xxgg-cp-count" style="margin-left:auto;color:#666;font-size:12px;"></span>' +
+          '<span id="xxgg-cp-count" style="margin-left:auto;color:' + SURFACE_MUTED + ';font-size:12px;"></span>' +
         '</div>' +
         '<div id="xxgg-cp-list" style="flex:1;overflow:auto;padding:0 12px 8px;min-height:60px;"></div>' +
-        '<div style="display:flex;gap:8px;padding:10px 12px;border-top:1px solid #eee;">' +
+        '<div style="display:flex;gap:8px;padding:10px 12px;border-top:1px solid ' + LINE + ';">' +
           '<button id="xxgg-cp-clear" type="button" style="' + BTN + 'flex:1;">' + T.clear + '</button>' +
           '<button id="xxgg-cp-refresh" type="button" style="' + BTN + 'flex:1;">' + T.refresh + '</button>' +
         '</div>' +
-        '<div style="padding:0 12px 10px;color:#888;font-size:12px;">' + T.hint + '</div>' +
+        '<div style="padding:0 12px 10px;color:' + SURFACE_MUTED + ';font-size:12px;">' + T.hint + '</div>' +
       '</div>' +
-      '<button id="xxgg-cp-toggle" type="button" style="all:unset;cursor:pointer;padding:6px 12px;' +
-        'border-radius:999px;background:#1f6feb;color:#fff;font-size:13px;' +
-        'box-shadow:0 4px 14px rgba(0,0,0,.25);">' + T.toggle + '</button>';
+      '<button id="xxgg-cp-toggle" type="button" style="all:unset;box-sizing:border-box;cursor:pointer;' +
+        'padding:6px 12px;border-radius:6px;border:1px solid ' + LINE + ';background:' + SURFACE + ';' +
+        'color:' + SURFACE_FG + ';font-size:12px;font-weight:600;line-height:1;' +
+        'box-shadow:0 1px 3px rgba(0,0,0,.08);transition:background .12s,border-color .12s;">' + T.toggle + '</button>';
 
     (D.body || D.documentElement).appendChild(host);
     wire();
@@ -181,7 +191,7 @@
     for (var i = 0; i < chans.length; i++) {
       var on = state.channel === chans[i][0];
       html += '<button type="button" data-chan="' + chans[i][0] + '" style="' + BTN +
-        (on ? 'background:#1f6feb;color:#fff;border-color:#1f6feb;' : '') + '">' + chans[i][1] + '</button>';
+        (on ? BTN_ON : '') + '">' + chans[i][1] + '</button>';
     }
     host.innerHTML = html;
     var btns = host.querySelectorAll('button[data-chan]');

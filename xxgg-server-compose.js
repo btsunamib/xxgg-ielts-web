@@ -1459,6 +1459,30 @@
 
           if (!unitResultIds.length) {
             composeToast(composeFailureDetail(jobs, order, unknown, channel, submitted.length));
+            // If the upstream refused every unit with an auth-shaped business
+            // code, say so instead of a generic 500: an account that does not
+            // own the entitlement cannot have these attempts accepted. Use the
+            // one shape the app renders as "no permission" and never as an
+            // expired session.
+            var refused = null;
+            for (var fj = 0; fj < jobs.length; fj++) {
+              var jr = jobs[fj];
+              if (!jr) continue;
+              var c = str(jr.code);
+              if (c === '401' || c === '403' || c === '10401' || c === '10403') { refused = jr; break; }
+            }
+            if (refused) {
+              return jsonResponse({
+                code: '401',
+                msg: 'MIXED_PRACTICE_ENTITLEMENT_REQUIRED',
+                data: {
+                  error: 'MIXED_PRACTICE_ENTITLEMENT_REQUIRED',
+                  upstreamCode: str(refused.code),
+                  upstreamError: str(refused.dataError),
+                  upstreamMsg: str(refused.msg).slice(0, 200)
+                }
+              }, 200);
+            }
             return fail('MIXED_PRACTICE_RUNTIME_NOT_READY', 500);
           }
 
