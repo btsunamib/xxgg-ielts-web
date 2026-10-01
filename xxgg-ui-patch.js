@@ -713,9 +713,51 @@
   D.addEventListener('DOMContentLoaded', entInstall);
   try { setTimeout(entInstall, 400); } catch (e) { }
 
+  /* ------------------------------------------------------------------ */
+  /* Listening compose: the audio preload overlay must not eat the click  */
+  /*                                                                     */
+  /* In a composed (mixed) listening paper the full-screen                */
+  /* `preload-overlay` ("音频加载中", data-live-overlay=                  */
+  /* listening-audio-preload) can sit on top of the footer and swallow    */
+  /* the click on "Finish section", so the submit request never fires.    */
+  /* Reading has no such overlay, which is why only listening failed.     */
+  /*                                                                     */
+  /* The overlay is informational (role=status) - keep it visible, just   */
+  /* stop it from capturing pointer events, and lift the footer above it. */
+  /*                                                                     */
+  /* Deliberately NOT done: forcing `disabled` off on the submit button.  */
+  /* The listening page hard-codes submit-disabled=false and does not     */
+  /* disable the footer, so that loop was a no-op - and if the app ever   */
+  /* does disable it, overriding that would bypass its own guard.         */
+  /* ------------------------------------------------------------------ */
+  var SUBMIT_UNLOCK_ID = 'xxgg-listening-submit-unlock';
+  var SUBMIT_UNLOCK_CSS = [
+    '.preload-overlay{pointer-events:none !important;}',
+    '.preload-overlay .preload-content{pointer-events:auto !important;}',
+    '.footer-bottom-btn{position:relative;z-index:10050;}'
+  ].join('\n');
+
+  function unlockListeningSubmit() {
+    try {
+      if (D.getElementById(SUBMIT_UNLOCK_ID)) return;
+      var st = D.createElement('style');
+      st.id = SUBMIT_UNLOCK_ID;
+      st.textContent = SUBMIT_UNLOCK_CSS;
+      (D.head || D.documentElement).appendChild(st);
+    } catch (e) { }
+  }
+
+  unlockListeningSubmit();
+  D.addEventListener('DOMContentLoaded', unlockListeningSubmit);
+  try {
+    setTimeout(unlockListeningSubmit, 800);
+    setTimeout(unlockListeningSubmit, 2500);
+  } catch (e) { }
+
   W.__xxggUiPatch = {
     hidden: ['ielts-rail-plan-link'],
     moreRowsUnlock: MORE_ROWS_UNLOCK,
-    rowsDiag: ROWS_DIAG
+    rowsDiag: ROWS_DIAG,
+    listeningSubmitUnlock: true
   };
 })();

@@ -1431,22 +1431,23 @@
           return fail('MIXED_PRACTICE_NOT_ENOUGH_PARTS', 500);
         }
 
-        // 2. submit each unit subset sequentially (gentle on the upstream)
-        var jobs = [];
-        var chain = Promise.resolve();
+        // 2. submit every unit subset in PARALLEL.
+        //    The app's request layer aborts a mixed submit at 15s, and a
+        //    listening paper is 4 units. Serial submits plus 4 review
+        //    harvests cannot fit in that budget; parallel wall time is
+        //    max() instead of sum(), which is what makes listening work.
+        var jobPromises = [];
         for (var oi = 0; oi < order.length; oi++) {
-          chain = chain.then((function (uid) {
-            return function () {
-              return submitUnitSubset(uid, channel, buckets[uid], comp).then(function (r) {
-                jobs.push(r);
-              }, function () {
-                jobs.push({ unitId: uid, ok: false, resultId: '' });
-              });
-            };
+          jobPromises.push((function (uid) {
+            return submitUnitSubset(uid, channel, buckets[uid], comp).then(function (r) {
+              return r;
+            }, function () {
+              return { unitId: uid, ok: false, resultId: '' };
+            });
           })(order[oi]));
         }
 
-        return chain.then(function () {
+        return Promise.all(jobPromises).then(function (jobs) {
           var unitResultIds = [];
           var failures = [];
           for (var j = 0; j < jobs.length; j++) {
@@ -1490,23 +1491,22 @@
             return fail('MIXED_PRACTICE_RUNTIME_NOT_READY', 500);
           }
 
-          // 4. harvest rightAnswer for every resultId
-          var harvestChain = Promise.resolve();
+          // 4. harvest rightAnswer for every resultId, in parallel for the
+          //    same 15s budget.
           var harvested = 0;
+          var harvestJobs = [];
           for (var h = 0; h < unitResultIds.length; h++) {
-            harvestChain = harvestChain.then((function (rid) {
-              return function () {
-                var url = apiBase() + '/practice/v1/results/' + encodeURIComponent(rid) + '/review';
-                return requestUpstream(url, { method: 'GET' }, UPSTREAM_TIMEOUT_MS)
-                  .then(function (res) {
-                    if (!res || !res.ok) return;
-                    harvested += harvestFromReview(res.data, '', comp.partUnits, comp.groupUnits);
-                  }, function () { /* ignore */ });
-              };
+            harvestJobs.push((function (rid) {
+              var url = apiBase() + '/practice/v1/results/' + encodeURIComponent(rid) + '/review';
+              return requestUpstream(url, { method: 'GET' }, UPSTREAM_TIMEOUT_MS)
+                .then(function (res) {
+                  if (!res || !res.ok) return;
+                  harvested += harvestFromReview(res.data, '', comp.partUnits, comp.groupUnits);
+                }, function () { /* ignore */ });
             })(unitResultIds[h]));
           }
 
-          return harvestChain.then(function () {
+          return Promise.all(harvestJobs).then(function () {
             // 5. persist the answer cache
             var saved = saveAnswers();
 
