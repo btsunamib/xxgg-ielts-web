@@ -1674,27 +1674,6 @@
 
   function composeToast(text) {
     try { console.warn('[xxgg-server-compose] ' + String(text).replace(/\n/g, ' | ')); } catch (e) { }
-    try {
-      var D = W.document;
-      if (!D || !D.body) return;
-      var el = D.getElementById('xxgg-sc-toast');
-      if (!el) {
-        el = D.createElement('div');
-        el.id = 'xxgg-sc-toast';
-        el.setAttribute('style',
-          'position:fixed;right:14px;bottom:96px;z-index:2147483646;max-width:540px;' +
-          'padding:10px 12px;border-radius:8px;background:rgba(20,20,24,.94);color:#fff;' +
-          'font:12px/1.55 ui-monospace,Menlo,Consolas,monospace;white-space:pre-wrap;' +
-          'word-break:break-all;box-shadow:0 6px 24px rgba(0,0,0,.35);pointer-events:none;');
-        D.body.appendChild(el);
-      }
-      el.textContent = String(text);
-      el.style.display = 'block';
-      if (composeToastTimer) clearTimeout(composeToastTimer);
-      composeToastTimer = setTimeout(function () {
-        try { el.style.display = 'none'; } catch (e) { }
-      }, 30000);
-    } catch (e) { }
   }
 
   function composeFailureDetail(jobs, order, unknown, channel, submittedCount) {

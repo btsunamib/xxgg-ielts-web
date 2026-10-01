@@ -605,34 +605,15 @@
   /*                                                                     */
   /* Set ROWS_DIAG to false (or delete this block) once settled.           */
   /* ------------------------------------------------------------------ */
-  var ROWS_DIAG = true;
+  var ROWS_DIAG = false;
   var diagShown = false;
 
   function showToast(text, ms) {
     try {
+      // Toast disabled on request; reportRows still logs to the console.
       if (!ROWS_DIAG) return;
-      var host = D.body || D.documentElement;
-      if (!host) return;
-      var el = D.getElementById('xxgg-diag-toast');
-      if (!el) {
-        el = D.createElement('div');
-        el.id = 'xxgg-diag-toast';
-        el.setAttribute('style', [
-          'position:fixed', 'right:14px', 'bottom:14px', 'z-index:2147483647',
-          'max-width:480px', 'padding:10px 12px', 'border-radius:8px',
-          'background:rgba(20,20,24,.92)', 'color:#fff',
-          'font:12px/1.55 ui-monospace,Menlo,Consolas,monospace',
-          'white-space:pre-wrap', 'word-break:break-all',
-          'box-shadow:0 6px 24px rgba(0,0,0,.35)', 'pointer-events:none'
-        ].join(';'));
-        host.appendChild(el);
-      }
-      el.textContent = String(text);
-      el.style.display = 'block';
-      if (showToast._t) clearTimeout(showToast._t);
-      showToast._t = setTimeout(function () {
-        try { el.style.display = 'none'; } catch (e) { }
-      }, ms || 25000);
+      void text; void ms;
+      return;
     } catch (e) { }
   }
 
