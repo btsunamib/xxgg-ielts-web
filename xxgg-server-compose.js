@@ -1387,7 +1387,16 @@
     }, UPSTREAM_TIMEOUT_MS).then(function (res) {
       var data = res && res.ok ? res.data : null;
       var resultId = str(data && (data.resultId || data.attemptId));
-      return { unitId: str(unitId), ok: !!(res && res.ok && resultId), resultId: resultId, res: res };
+      var raw = res && isPlainObject(res.raw) ? res.raw : {};
+      return {
+        unitId: str(unitId),
+        ok: !!(res && res.ok && resultId),
+        resultId: resultId,
+        status: res ? num(res.status, 0) : 0,
+        code: str(raw.code !== undefined && raw.code !== null ? raw.code : ''),
+        msg: str(raw.msg || raw.message || ''),
+        dataError: str(raw.data && (raw.data.error || raw.data.businessCode) || '')
+      };
     });
   }
 
@@ -1449,6 +1458,7 @@
           }
 
           if (!unitResultIds.length) {
+            composeToast(composeFailureDetail(jobs, order, unknown, channel, submitted.length));
             return fail('MIXED_PRACTICE_RUNTIME_NOT_READY', 500);
           }
 
@@ -1651,6 +1661,88 @@
     }
   }
 
+
+  /* ------------------------------------------------------------------ */
+  /* Diagnostics: make a failed submit explain itself                     */
+  /*                                                                     */
+  /* We fake the `mixed_practice` entitlement, so when the real upstream   */
+  /* refuses a unit submission the app only ever sees a generic 500 and    */
+  /* the reason is lost. This surfaces it (console + on-page toast) and    */
+  /* keeps an auth-shaped answer from reading as an expired session.       */
+  /* ------------------------------------------------------------------ */
+  var composeToastTimer = null;
+
+  function composeToast(text) {
+    try { console.warn('[xxgg-server-compose] ' + String(text).replace(/\n/g, ' | ')); } catch (e) { }
+    try {
+      var D = W.document;
+      if (!D || !D.body) return;
+      var el = D.getElementById('xxgg-sc-toast');
+      if (!el) {
+        el = D.createElement('div');
+        el.id = 'xxgg-sc-toast';
+        el.setAttribute('style',
+          'position:fixed;right:14px;bottom:96px;z-index:2147483646;max-width:540px;' +
+          'padding:10px 12px;border-radius:8px;background:rgba(20,20,24,.94);color:#fff;' +
+          'font:12px/1.55 ui-monospace,Menlo,Consolas,monospace;white-space:pre-wrap;' +
+          'word-break:break-all;box-shadow:0 6px 24px rgba(0,0,0,.35);pointer-events:none;');
+        D.body.appendChild(el);
+      }
+      el.textContent = String(text);
+      el.style.display = 'block';
+      if (composeToastTimer) clearTimeout(composeToastTimer);
+      composeToastTimer = setTimeout(function () {
+        try { el.style.display = 'none'; } catch (e) { }
+      }, 30000);
+    } catch (e) { }
+  }
+
+  function composeFailureDetail(jobs, order, unknown, channel, submittedCount) {
+    var lines = [];
+    lines.push('\u63d0\u4ea4\u5931\u8d25  channel=' + channel +
+      '  \u8bc6\u522b\u5355\u5143=' + order.length + '  \u63d0\u4ea4\u7bc7\u76ee=' + submittedCount);
+    if (!jobs.length) lines.push('  (\u6ca1\u6709\u4efb\u4f55\u5355\u5143\u88ab\u63d0\u4ea4)');
+    for (var i = 0; i < jobs.length && i < 6; i++) {
+      var j = jobs[i] || {};
+      lines.push('  ' + j.unitId + ' -> http' + (j.status || 0) + ' code=' + (j.code || '-') +
+        (j.dataError ? ' err=' + j.dataError : '') +
+        (j.msg ? ' msg=' + String(j.msg).slice(0, 90) : ''));
+    }
+    if (unknown.length) lines.push('  \u672a\u8bc6\u522b\u7bc7\u76ee=' + unknown.length);
+    return lines.join('\n');
+  }
+
+  // The one body the app treats as a benign entitlement state rather than an
+  // expired session (see the client's xw()/Ew() guards).
+  function entitlementOnlyResponse() {
+    return jsonResponse({
+      code: '401',
+      msg: 'MIXED_PRACTICE_ENTITLEMENT_REQUIRED',
+      data: { error: 'MIXED_PRACTICE_ENTITLEMENT_REQUIRED' }
+    }, 200);
+  }
+
+  function neutraliseMixedAuth(res) {
+    try {
+      if (!res || typeof res.clone !== 'function') return res;
+      var httpAuth = res.status === 401 || res.status === 403;
+      return res.clone().json().then(function (body) {
+        var code = body && body.code !== undefined && body.code !== null ? String(body.code) : '';
+        var authish = httpAuth || code === '401' || code === '403' ||
+          code === '10401' || code === '10403';
+        if (!authish) return res;
+        safe(function () {
+          console.warn('[xxgg-server-compose] neutralised a mixed-practice auth failure', {
+            status: res.status, code: code, msg: body && (body.msg || body.message || '')
+          });
+        }, null);
+        return entitlementOnlyResponse();
+      }, function () {
+        return httpAuth ? entitlementOnlyResponse() : res;
+      });
+    } catch (e) { return res; }
+  }
+
   /* ------------------------------------------------------------------ */
   /* fetch patch                                                         */
   /* ------------------------------------------------------------------ */
@@ -1675,7 +1767,18 @@
     try { route = rawUrl ? matchRoute(rawUrl, method) : null; } catch (e) { route = null; }
 
     if (!route) {
-      return nativeFetch(input, init);
+      if (rawUrl.indexOf('/mixed-practice/') === -1) {
+        return nativeFetch(input, init);
+      }
+      // We fake `mixed_practice`, so the real server can answer these paths with
+      // 401/403 for an account that does not own the entitlement. The app turns
+      // any auth code it cannot attribute to the entitlement into a forced
+      // logout (it clears token+user) - that is the "提交完就退登" report.
+      // Re-shape such an answer into the body the app treats as benign.
+      return Promise.resolve()
+        .then(function () { return nativeFetch(input, init); })
+        .then(function (res) { return neutraliseMixedAuth(res); },
+              function () { return nativeFetch(input, init); });
     }
 
     var ctx = {
