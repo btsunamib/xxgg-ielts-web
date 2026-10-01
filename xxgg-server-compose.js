@@ -169,6 +169,9 @@
       reason: reason || '',
       apiBase: function () { return apiBase(); },
       hasRealSession: hasRealSession,
+      // Used by xxgg-compose-picker.js to list candidates for the panel.
+      listUnits: function (channel) { return loadUnits(channel); },
+      customSelection: function () { return cloneJson(readCustomSelection()); },
       store: function () { return cloneJson(composeStore); },
       answers: function () { return cloneJson(answerCache); },
       stats: function () { return statsSnapshot(); },
@@ -988,6 +991,70 @@
     return channel === 'listening' ? SLOTS_LISTENING : SLOTS_READING;
   }
 
+  /* ------------------------------------------------------------------ */
+  /* Custom selection ("自选组卷")                                        */
+  /*                                                                     */
+  /* xxgg-compose-picker.js writes:                                       */
+  /*   { enabled: true, channel: 'reading', unitIds: ['u1','u2','u3'] }   */
+  /* When it matches the requested channel it replaces the random picker. */
+  /* ------------------------------------------------------------------ */
+  var CUSTOM_KEY = 'xxgg.compose.custom.v1';
+  var MAX_CUSTOM_PICKS = 40;
+
+  function readCustomSelection() {
+    var raw = lsGet(CUSTOM_KEY);
+    var parsed = raw ? safe(function () { return JSON.parse(raw); }, null) : null;
+    if (!isPlainObject(parsed)) return null;
+    var ids = [];
+    var list = asArray(parsed.unitIds);
+    for (var i = 0; i < list.length && ids.length < MAX_CUSTOM_PICKS; i++) {
+      var id = str(list[i]).trim();
+      if (id) ids.push(id);
+    }
+    return {
+      enabled: parsed.enabled !== false,
+      channel: normalizeChannel(parsed.channel) || '',
+      unitIds: ids
+    };
+  }
+
+  // Returns the user's passages (Part-ordered, capped at `need`) or null when
+  // there is no usable custom selection for this channel.
+  function customPick(pool, need, channel) {
+    var sel = readCustomSelection();
+    if (!sel || !sel.enabled || !sel.unitIds.length) return null;
+    if (sel.channel && sel.channel !== channel) return null;
+
+    var byId = {};
+    for (var i = 0; i < pool.length; i++) byId[str(pool[i].unitId)] = pool[i];
+
+    var picked = [];
+    var seen = {};
+    for (i = 0; i < sel.unitIds.length; i++) {
+      var id = str(sel.unitIds[i]);
+      if (!id || seen[id]) continue;
+      seen[id] = 1;
+      if (byId[id]) picked.push(byId[id]);
+    }
+    if (!picked.length) return null;
+
+    picked.sort(function (x, y) { return (x.partRank || 99) - (y.partRank || 99); });
+    picked = picked.slice(0, need);
+
+    // The user picked fewer passages than the paper needs: top up from the
+    // rest so the composed paper stays valid.
+    if (picked.length < need) {
+      for (i = 0; i < pool.length && picked.length < need; i++) {
+        var uid = str(pool[i].unitId);
+        if (seen[uid]) continue;
+        seen[uid] = 1;
+        picked.push(pool[i]);
+      }
+      picked.sort(function (x, y) { return (x.partRank || 99) - (y.partRank || 99); });
+    }
+    return picked;
+  }
+
   function handleCompose(ctx) {
     return readBody(ctx.input, ctx.init).then(function (body) {
       var b = isPlainObject(body) ? body : {};
@@ -1063,7 +1130,16 @@
             '|' + (preferHighFrequency ? '1' : '0')
           ));
 
-                    var warning = null;
+          var warning = null;
+          var chosen = [];
+
+          // A custom selection from the 自选组卷 panel wins over the random
+          // picker: those exact passages, in Part order.
+          var customChosen = customPick(pool, need, channel);
+
+          if (customChosen) {
+            chosen = customChosen.slice();
+          } else {
 
           // Group by IELTS Part and take exactly ONE passage per Part, so a
           // paper can never contain e.g. three Part 3 passages.
@@ -1082,7 +1158,6 @@
           var gkeys = Object.keys(groups);
           gkeys.sort(function (x, y) { return groups[x].rank - groups[y].rank; });
 
-          var chosen = [];
           for (i = 0; i < gkeys.length; i++) {
             var g = groups[gkeys[i]];
             var items = g.items.slice();
@@ -1112,6 +1187,8 @@
           chosen.sort(function (x, y) { return (x.partRank || 99) - (y.partRank || 99); });
           // Never emit more slots than the paper asks for (reading = 3).
           chosen = chosen.slice(0, need);
+
+          }
 
           var slots = [];
           for (i = 0; i < chosen.length; i++) {
