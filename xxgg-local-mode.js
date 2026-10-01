@@ -2434,6 +2434,13 @@ var seq = nextSeq();
   }
 
   function patchedFetch(input, init) {
+    // Login can happen after this script installs local mode. Check on every
+    // request so a real account never receives local attempts or fake results.
+    var currentToken = lsGet(TOKEN_KEY);
+    if (currentToken && !isLocalTokenValue(currentToken)) {
+      return nativeFetch(input, init);
+    }
+
     var rawUrl = '';
     var method = 'GET';
     try {
