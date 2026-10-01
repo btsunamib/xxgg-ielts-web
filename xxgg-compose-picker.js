@@ -239,13 +239,31 @@
   function renderStatus() {
     var el = D.getElementById('xxgg-cp-status');
     if (!el) return;
-    var info = null;
-    try { info = JSON.parse(lsGet('xxgg.compose.lastSubmit') || 'null'); } catch (e) { info = null; }
-    if (!info || info.ok || !info.detail) { el.style.display = 'none'; el.textContent = ''; return; }
+    var lines = [];
+
+    try {
+      var info = JSON.parse(lsGet('xxgg.compose.lastSubmit') || 'null');
+      if (info && !info.ok && info.detail) {
+        var when = '';
+        try { when = info.at ? new Date(info.at).toLocaleTimeString() : ''; } catch (e) { when = ''; }
+        lines.push(T.lastFail + (when ? '\uff08' + when + '\uff09' : '') + '\n' + String(info.detail));
+      }
+    } catch (e) { }
+
+    // Which request made the app force-logout. Only set when one happened.
+    try {
+      var af = JSON.parse(lsGet('xxgg.auth.lastFailure') || 'null');
+      if (af && af.at) {
+        var w2 = '';
+        try { w2 = new Date(af.at).toLocaleTimeString(); } catch (e) { w2 = ''; }
+        lines.push('\u88ab\u9000\u767b\u7684\u8bf7\u6c42\uff08' + w2 + '\uff09\uff1aHTTP ' + af.status +
+          '  code=' + (af.code || '-') + '\n' + af.path + (af.msg ? '\n' + af.msg : ''));
+      }
+    } catch (e) { }
+
+    if (!lines.length) { el.style.display = 'none'; el.textContent = ''; return; }
     el.style.display = 'block';
-    var when = '';
-    try { when = info.at ? new Date(info.at).toLocaleTimeString() : ''; } catch (e) { when = ''; }
-    el.textContent = T.lastFail + (when ? '\uff08' + when + '\uff09' : '') + '\n' + String(info.detail);
+    el.textContent = lines.join('\n\n');
   }
 
   function renderList() {

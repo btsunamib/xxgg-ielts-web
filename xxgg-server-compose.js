@@ -354,6 +354,9 @@
     return nativeFetch(url, opts).then(function (res) {
       if (timer) clearTimeout(timer);
       if (!res) return { ok: false, status: 0, data: null, raw: null };
+      if (res.status === 401 || res.status === 403) {
+        noteAuthFailure('upstream', res.status, '', '', url);
+      }
       return res.text().then(function (t) {
         var raw = null;
         try { raw = t ? JSON.parse(t) : null; } catch (e) { raw = null; }
@@ -1780,6 +1783,34 @@
   /* the reason is lost. This surfaces it (console + on-page toast) and    */
   /* keeps an auth-shaped answer from reading as an expired session.       */
   /* ------------------------------------------------------------------ */
+  /* ------------------------------------------------------------------ */
+  /* Auth-failure recorder                                               */
+  /*                                                                     */
+  /* The app force-logs-out (clears token+user, fires xxgg-auth-expired)  */
+  /* whenever it SEES an auth code: HTTP 401/403, or business code        */
+  /* 401/403/10401/10403 on a route it does not defer. Our own upstream   */
+  /* calls swallow that, so the culprit is always a request the app made  */
+  /* itself. Record it so the picker can show which one.                  */
+  /* ------------------------------------------------------------------ */
+  var AUTH_FAIL_KEY = 'xxgg.auth.lastFailure';
+
+  function noteAuthFailure(source, status, code, msg, url) {
+    try {
+      var p = '';
+      try { p = pathOf(url); } catch (e) { p = str(url).slice(0, 180); }
+      var rec = {
+        at: nowIso(),
+        source: str(source),
+        status: num(status, 0),
+        code: str(code),
+        msg: str(msg).slice(0, 220),
+        path: p
+      };
+      lsSet(AUTH_FAIL_KEY, JSON.stringify(rec));
+      try { console.warn('[xxgg-server-compose] auth failure', rec); } catch (e) { }
+    } catch (e) { }
+  }
+
   var composeToastTimer = null;
 
   function composeToast(text) {
@@ -1856,18 +1887,17 @@
     try { route = rawUrl ? matchRoute(rawUrl, method) : null; } catch (e) { route = null; }
 
     if (!route) {
-      if (rawUrl.indexOf('/mixed-practice/') === -1) {
-        return nativeFetch(input, init);
-      }
-      // We fake `mixed_practice`, so the real server can answer these paths with
-      // 401/403 for an account that does not own the entitlement. The app turns
-      // any auth code it cannot attribute to the entitlement into a forced
-      // logout (it clears token+user) - that is the "提交完就退登" report.
-      // Re-shape such an answer into the body the app treats as benign.
+      var isMixedPath = rawUrl.indexOf('/mixed-practice/') !== -1;
       return Promise.resolve()
         .then(function () { return nativeFetch(input, init); })
-        .then(function (res) { return neutraliseMixedAuth(res); },
-              function () { return nativeFetch(input, init); });
+        .then(function (res) {
+          try {
+            if (res && (res.status === 401 || res.status === 403)) {
+              noteAuthFailure('passthrough', res.status, '', '', rawUrl);
+            }
+          } catch (e) { }
+          return isMixedPath ? neutraliseMixedAuth(res) : res;
+        }, function (e) { throw e; });
     }
 
     var ctx = {
