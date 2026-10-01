@@ -419,10 +419,58 @@
     }
   }
 
+  /* ------------------------------------------------------------------ */
+  /* Persistence: slots only                                             */
+  /*                                                                     */
+  /* The in-memory store keeps the full exam and attempt trees, but       */
+  /* persisting them is what blows the ~5MB localStorage quota: one       */
+  /* composition carries the whole merged paper (article HTML, sentences, */
+  /* groups, questions, audio urls) and then a second copy inside         */
+  /* attempt.parts. Once the quota is hit the write fails and the next    */
+  /* reload loses the composition entirely - which is how a tablet ended  */
+  /* up with "本地找不到这份组卷记录".                                     */
+  /*                                                                     */
+  /* Everything dropped here is rebuildable: `slots` is enough for        */
+  /* buildCompositionExam() to rebuild the paper, and attempt.details     */
+  /* keeps the per-question marks the review renders.                     */
+  /* ------------------------------------------------------------------ */
+  var HEAVY_COMPOSE_FIELDS = { exam: 1, parts: 1 };
+
+  function slimForStorage(store) {
+    var out = {
+      version: store.version,
+      seq: store.seq,
+      compositions: {},
+      doneUnits: store.doneUnits
+    };
+    var src = isPlainObject(store.compositions) ? store.compositions : {};
+    var ids = Object.keys(src);
+    for (var i = 0; i < ids.length; i++) {
+      var c = src[ids[i]];
+      if (!isPlainObject(c)) continue;
+      var light = {};
+      var k;
+      for (k in c) {
+        if (!has(c, k) || HEAVY_COMPOSE_FIELDS[k]) continue;
+        light[k] = c[k];
+      }
+      if (isPlainObject(c.attempt)) {
+        var la = {};
+        for (k in c.attempt) {
+          if (!has(c.attempt, k) || HEAVY_COMPOSE_FIELDS[k]) continue;
+          la[k] = c.attempt[k];
+        }
+        light.attempt = la;
+      }
+      out.compositions[ids[i]] = light;
+    }
+    return out;
+  }
+
   function saveComposeStore() {
     pruneCompositions();
     for (var attempt = 0; attempt < 4; attempt++) {
-      var text = safe(function () { return JSON.stringify(composeStore); }, null);
+      var text = safe(function () { return JSON.stringify(slimForStorage(composeStore)); }, null);
       if (text === null) return false;
       if (lsSet(COMPOSE_KEY, text)) return true;
       // Quota exhausted: drop the oldest composition and retry.
@@ -1272,6 +1320,9 @@
         parts: [],
         originalParents: []
       });
+      // Persist the slim store as soon as we know this composition is live, so
+      // a later reload can still rebuild the paper from its slots.
+      safe(function () { saveComposeStore(); }, null);
       return ok(exam);
     });
   }
