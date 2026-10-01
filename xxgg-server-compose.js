@@ -1458,7 +1458,11 @@
           }
 
           if (!unitResultIds.length) {
-            composeToast(composeFailureDetail(jobs, order, unknown, channel, submitted.length));
+            var failDetail = composeFailureDetail(jobs, order, unknown, channel, submitted.length);
+            composeToast(failDetail);
+            lsSet('xxgg.compose.lastSubmit', JSON.stringify({
+              at: nowIso(), channel: channel, ok: false, detail: failDetail
+            }));
             // If the upstream refused every unit with an auth-shaped business
             // code, say so instead of a generic 500: an account that does not
             // own the entitlement cannot have these attempts accepted. Use the
@@ -1545,6 +1549,10 @@
                 });
               }, null);
             }
+
+            lsSet('xxgg.compose.lastSubmit', JSON.stringify({
+              at: nowIso(), channel: channel, ok: true, detail: ''
+            }));
 
             // 7. EXACT response shape the app requires.
             return ok({

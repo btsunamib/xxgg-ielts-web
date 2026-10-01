@@ -51,10 +51,13 @@
     piece: '\u7bc7',                                    // 篇
     picked: '\u5df2\u9009',                             // 已选
     hint: '\u52fe\u9009\u540e\u70b9\u5e94\u7528\u91cc\u7684\u201c\u7ec4\u5377\u201d\uff0c\u5373\u53ef\u6309\u8fd9\u5957\u7bc7\u76ee\u51fa\u5377\u3002', // 勾选后点应用里的"组卷"，即可按这套篇目出卷。
+    searchHint: '\u641c\u7d22\u7bc7\u76ee\u2026',          // 搜索篇目…
+    noMatch: '\u6ca1\u6709\u5339\u914d\u7684\u7bc7\u76ee',  // 没有匹配的篇目
+    lastFail: '\u4e0a\u6b21\u63d0\u4ea4\u5931\u8d25\uff1a',  // 上次提交失败：
     close: '\u2715'
   };
 
-  var state = { open: false, channel: 'reading', units: [], loading: false, error: '' };
+  var state = { open: false, channel: 'reading', units: [], loading: false, error: '', query: '' };
 
   /* ------------------------------------------------------------------ */
   /* storage                                                             */
@@ -126,6 +129,9 @@
           '<button id="xxgg-cp-close" type="button" style="all:unset;cursor:pointer;color:' + SURFACE_MUTED + ';padding:0 4px;font-size:13px;">' + T.close + '</button>' +
         '</div>' +
         '<div id="xxgg-cp-tabs" style="display:flex;gap:6px;padding:10px 12px 0;"></div>' +
+        '<div style="padding:10px 12px 0;">' +
+          '<input id="xxgg-cp-search" type="search" autocomplete="off" placeholder="' + T.searchHint + '" style="all:unset;box-sizing:border-box;display:block;width:100%;padding:5px 8px;border:1px solid ' + LINE + ';border-radius:6px;background:transparent;color:' + SURFACE_FG + ';font-size:12px;">' +
+        '</div>' +
         '<div style="padding:8px 12px;display:flex;align-items:center;gap:10px;">' +
           '<label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:12px;">' +
             '<input id="xxgg-cp-enable" type="checkbox">' + T.enable + '</label>' +
@@ -136,6 +142,7 @@
           '<button id="xxgg-cp-clear" type="button" style="' + BTN + 'flex:1;">' + T.clear + '</button>' +
           '<button id="xxgg-cp-refresh" type="button" style="' + BTN + 'flex:1;">' + T.refresh + '</button>' +
         '</div>' +
+        '<div id="xxgg-cp-status" style="display:none;margin:0 12px 8px;padding:6px 8px;border-radius:6px;background:var(--auth-error-soft,rgba(213,76,76,.06));color:var(--auth-error,#c83a3a);font-size:12px;white-space:pre-wrap;word-break:break-all;"></div>' +
         '<div style="padding:0 12px 10px;color:' + SURFACE_MUTED + ';font-size:12px;">' + T.hint + '</div>' +
       '</div>' +
       '<button id="xxgg-cp-toggle" type="button" style="all:unset;box-sizing:border-box;cursor:pointer;' +
@@ -162,6 +169,10 @@
       renderCount();
     });
     on('xxgg-cp-refresh', 'click', function () { load(); });
+    on('xxgg-cp-search', 'input', function (e) {
+      state.query = e.target.value || '';
+      renderList();
+    });
     on('xxgg-cp-enable', 'change', function (e) {
       var sel = readSel();
       sel.enabled = e.target.checked === true;
@@ -175,7 +186,7 @@
     var panel = D.getElementById('xxgg-cp-panel');
     if (panel) panel.style.display = state.open ? 'flex' : 'none';
     if (state.open && !state.units.length && !state.loading) load();
-    if (state.open) renderAll();
+    if (state.open) { renderAll(); renderStatus(); }
   }
 
   function toggle() { ensureHost(); setOpen(!state.open); }
@@ -222,6 +233,19 @@
     if (en) en.checked = sel.enabled === true;
   }
 
+  // Why the last submit failed, recorded by xxgg-server-compose.js. The panel
+  // is the one surface the user opens on purpose, so the reason lands here
+  // instead of in a toast.
+  function renderStatus() {
+    var el = D.getElementById('xxgg-cp-status');
+    if (!el) return;
+    var info = null;
+    try { info = JSON.parse(lsGet('xxgg.compose.lastSubmit') || 'null'); } catch (e) { info = null; }
+    if (!info || info.ok || !info.detail) { el.style.display = 'none'; el.textContent = ''; return; }
+    el.style.display = 'block';
+    el.textContent = T.lastFail + '\n' + String(info.detail);
+  }
+
   function renderList() {
     var list = D.getElementById('xxgg-cp-list');
     if (!list) return;
@@ -234,10 +258,32 @@
     var picked = {};
     for (var i = 0; i < sel.unitIds.length; i++) picked[sel.unitIds[i]] = 1;
 
+    // Search filter. Already-picked passages are kept in the list even when the
+    // query excludes them, otherwise the user cannot uncheck what they picked.
+    var q = String(state.query || '').trim().toLowerCase();
+    var source = state.units;
+    if (q) {
+      source = [];
+      for (i = 0; i < state.units.length; i++) {
+        var su = state.units[i];
+        var hay = (String(su.titleEn || '') + ' ' + String(su.titleZh || '') + ' ' +
+          String(su.unitId || '')).toLowerCase();
+        if (hay.indexOf(q) !== -1) source.push(su);
+      }
+      for (i = 0; i < state.units.length; i++) {
+        var ku = state.units[i];
+        if (picked[String(ku.unitId)] && source.indexOf(ku) === -1) source.push(ku);
+      }
+      if (!source.length) {
+        list.innerHTML = '<div style="padding:12px 0;color:' + SURFACE_MUTED + ';">' + T.noMatch + '</div>';
+        return;
+      }
+    }
+
     var groups = {};
     var order = [];
-    for (i = 0; i < state.units.length; i++) {
-      var u = state.units[i];
+    for (i = 0; i < source.length; i++) {
+      var u = source[i];
       var key = u.partNo ? String(u.partNo) : ('Part ' + (u.partRank || 99));
       if (!groups[key]) { groups[key] = { rank: u.partRank || 99, items: [] }; order.push(key); }
       groups[key].items.push(u);
