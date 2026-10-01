@@ -1411,6 +1411,16 @@
       var channel = normalizeChannel(b.channel) || normalizeChannel(comp.channel) || 'reading';
       var submitted = asArray(b.parts);
 
+      // Mark that the submit request actually reached this module, before any
+      // upstream work. If the panel later shows this "start" text and nothing
+      // else, the handler began but never finished (client aborted / upstream
+      // hung) - which is a different problem from "the handler failed".
+      lsSet('xxgg.compose.lastSubmit', JSON.stringify({
+        at: nowIso(), channel: channel, ok: false, phase: 'start',
+        detail: '\u6536\u5230\u63d0\u4ea4\u8bf7\u6c42\uff08\u7bc7\u76ee ' + submitted.length +
+          '\uff09\uff0c\u6b63\u5728\u5411\u670d\u52a1\u7aef\u63d0\u4ea4\u2026'
+      }));
+
       return ensureCompositionExam(id).then(function (exam) {
         var examParts = exam && isArray(exam.parts) ? exam.parts : [];
         var resolveUnit = buildUnitResolver(comp, examParts);

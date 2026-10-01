@@ -243,7 +243,9 @@
     try { info = JSON.parse(lsGet('xxgg.compose.lastSubmit') || 'null'); } catch (e) { info = null; }
     if (!info || info.ok || !info.detail) { el.style.display = 'none'; el.textContent = ''; return; }
     el.style.display = 'block';
-    el.textContent = T.lastFail + '\n' + String(info.detail);
+    var when = '';
+    try { when = info.at ? new Date(info.at).toLocaleTimeString() : ''; } catch (e) { when = ''; }
+    el.textContent = T.lastFail + (when ? '\uff08' + when + '\uff09' : '') + '\n' + String(info.detail);
   }
 
   function renderList() {
