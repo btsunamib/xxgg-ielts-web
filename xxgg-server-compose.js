@@ -1138,6 +1138,24 @@
     return picked;
   }
 
+  // Explicit drafts are scoped to one request, never a global random override.
+  function explicitPick(pool, body, need) {
+    var ids = asArray(body.selectedUnitIds);
+    if (ids.length !== need) return null;
+    var chosen = [], used = {}, parts = {};
+    for (var i = 0; i < ids.length; i++) {
+      var id = str(ids[i]);
+      var unit = null;
+      for (var j = 0; j < pool.length; j++) if (pool[j].unitId === id) { unit = pool[j]; break; }
+      if (!unit || used[id] || unit.partRank < 1 || unit.partRank > need || parts[unit.partRank]) return null;
+      used[id] = 1;
+      parts[unit.partRank] = 1;
+      chosen.push(unit);
+    }
+    chosen.sort(function (x, y) { return x.partRank - y.partRank; });
+    return chosen;
+  }
+
   function handleCompose(ctx) {
     return readBody(ctx.input, ctx.init).then(function (body) {
       var b = isPlainObject(body) ? body : {};
@@ -1218,7 +1236,10 @@
 
           // A custom selection from the 自选组卷 panel wins over the random
           // picker: those exact passages, in Part order.
-          var customChosen = customPick(pool, need, channel);
+          var explicit = b.selectionMode === 'custom' || b.selectedUnitIds !== undefined;
+          var customChosen = explicit ? explicitPick(pool, b, need)
+            : b.selectionMode === 'random' ? null : customPick(pool, need, channel);
+          if (explicit && !customChosen) return fail('MIXED_PRACTICE_SELECTION_INVALID', 400);
 
           if (customChosen) {
             chosen = customChosen.slice();
