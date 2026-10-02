@@ -23,6 +23,8 @@ function section(source, start, end) {
 function storage(initial = {}) {
   const rows = new Map(Object.entries(initial));
   return {
+    get length() { return rows.size; },
+    key: index => [...rows.keys()][index] ?? null,
     getItem: key => rows.get(key) ?? null,
     setItem: (key, value) => rows.set(key, String(value)),
     removeItem: key => rows.delete(key),
@@ -82,6 +84,208 @@ function ordinaryExam(h, channel = 'listening') {
 function submitState() {
   return Object.fromEntries(['isSubmitting', 'submitFailed', 'submitErrorMessage', 'isExitConfirmed'].map(key => [key, { value: false }]));
 }
+
+function draftModule(h) {
+  const source = fs.readFileSync(path.join(root, 'assets/useExamTimerLifecycle-hzBFzOTc.js'), 'utf8');
+  const listeners = new Map(), unmount = [];
+  Object.assign(h.window, { addEventListener: (key, fn) => listeners.set(key, fn), removeEventListener() {} });
+  Object.assign(h.ctx, { document: { addEventListener() {}, removeEventListener() {} },
+    E: value => ({ value }), _e: fn => unmount.push(fn), tt: h.auth });
+  vm.runInContext('(()=>{\n' + section(main, 'function BD(', 'function cB(')
+    + '\nconst nt=BD,Se=No;\n'
+    + section(source, 'function zn(', 'const R=Object.freeze')
+    + '\nglobalThis.progress=jn(unit=>Yn("ielts_listening_progress",unit),Gn);'
+    + '\nglobalThis.connectDraft=(unit,getAnswers)=>zn(progress,unit,()=>({answers:getAnswers()}),()=>true);})();', h.ctx);
+  return { progress: h.ctx.progress, connect: h.ctx.connectDraft, listeners, unmount };
+}
+const draftKey = unit => `ielts_listening_progress:${unit}:owner:student-1`;
+
+test('quota on the writer marker no longer prevents ordinary requests; a failed request retains a reloadable session draft', async () => {
+  let requests = 0, online = false;
+  const h = harness({ initial: session, rejectStorage: true, fetch: async () => {
+    requests++; if (!online) throw new TypeError('Failed to fetch'); return ok({ resultId: 'quota-result' });
+  } });
+  const exam = ordinaryExam(h), drafts = draftModule(h), draft = drafts.connect('unit-1', () => ({ 1: 'answer-1' }));
+  await draft.restore(() => assert.fail('new draft does not need claiming'));
+  const state = submitState(); let review = 0;
+  const args = { submitFn: () => draft.submit(() => exam.submitAnswers({ 1: 'answer-1' })),
+    isCurrent: draft.isCurrent, routeQuery: { unitId: 'unit-1' }, state,
+    clearProgress: draft.clear, router: { push: () => review++ } };
+  await h.submit(args);
+  assert.equal(requests, 1, 'quota must not reject before fetch');
+  assert.equal(state.submitFailed.value, true);
+  assert.equal(review, 0);
+  assert.deepEqual(JSON.parse(h.sessionStorage.getItem(draftKey('unit-1'))).answers, { 1: 'answer-1' });
+  const reload = harness({ sharedStorage: h.localStorage, sharedSessionStorage: h.sessionStorage });
+  assert.equal(draftModule(reload).progress.openSession('unit-1').loadProgress().answers[1], 'answer-1');
+  online = true;
+  await h.submit(args);
+  assert.equal(requests, 2);
+  assert.equal(review, 1);
+  assert.equal(h.sessionStorage.getItem(draftKey('unit-1')), null);
+  expectSession(h);
+});
+
+test('a server submit can proceed from in-memory answers even if both draft stores reject writes', async () => {
+  let requests = 0;
+  const h = harness({ initial: session, rejectStorage: true, rejectSessionStorage: true,
+    fetch: async () => { requests++; return ok({ resultId: 'memory-result' }); } });
+  const exam = ordinaryExam(h), draft = draftModule(h).connect('unit-1', () => ({ 1: 'answer-1' }));
+  await draft.restore(() => false);
+  const state = submitState(); let routed = false;
+  await h.submit({ submitFn: () => draft.submit(() => exam.submitAnswers({ 1: 'answer-1' })),
+    isCurrent: draft.isCurrent, routeQuery: { unitId: 'unit-1' }, state,
+    clearProgress: draft.clear, router: { push: () => { routed = true; } } });
+  assert.equal(requests, 1);
+  assert.equal(routed, true);
+  assert.equal(state.submitFailed.value, false);
+  expectSession(h);
+});
+
+test('completed draft cleanup releases quota and removes legacy copies without touching unfinished answers or result records', () => {
+  const done = draftKey('completed'), pending = draftKey('unfinished');
+  const legacy = 'ielts_listening_progress:completed';
+  const saved = { owner: 'student-1', answers: { 1: 'old-answer' }, lastSaved: 2 };
+  const h = harness({ initial: { ...session,
+    [done]: JSON.stringify({ owner: 'student-1', cleared: true, lastSaved: 3 }),
+    [done + ':writer']: 'old-writer', [legacy]: JSON.stringify(saved),
+    [legacy + ':legacy-backup']: JSON.stringify(saved),
+    [pending]: JSON.stringify({ ...saved, answers: { 1: 'unfinished-answer' } }),
+    [pending + ':writer']: 'unfinished-writer',
+    'xxgg.local.v1': JSON.stringify({ attempts: { result1: { details: ['review-answer'] } } }),
+    'user-settings': 'keep',
+  } });
+  const original = h.localStorage.setItem;
+  h.localStorage.setItem = (key, value) => {
+    if (h.localStorage.getItem(done)) throw new Error('QuotaExceededError');
+    return original(key, value);
+  };
+  const drafts = draftModule(h), next = drafts.progress.openSession('next');
+  assert.equal(next.saveProgress({ answers: { 1: 'next-answer' } }), true);
+  assert.equal(h.localStorage.getItem(done), null);
+  assert.equal(h.localStorage.getItem(done + ':writer'), null);
+  assert.equal(h.localStorage.getItem(legacy), null);
+  assert.equal(h.localStorage.getItem(legacy + ':legacy-backup'), null);
+  assert.equal(JSON.parse(h.localStorage.getItem(pending)).answers[1], 'unfinished-answer');
+  assert.equal(h.localStorage.getItem(pending + ':writer'), 'unfinished-writer');
+  assert.equal(JSON.parse(h.localStorage.getItem('xxgg.local.v1')).attempts.result1.details[0], 'review-answer');
+  assert.equal(h.localStorage.getItem('user-settings'), 'keep');
+});
+
+test('cleanup resolves completed and pending copies by save time instead of deleting newer unfinished answers', () => {
+  const key = draftKey('unit-1');
+  for (const pendingTime of [5, 1]) {
+    const h = harness({ initial: { ...session, [key]: JSON.stringify({ owner: 'student-1', cleared: true, lastSaved: 3 }) } });
+    h.sessionStorage.setItem(key, JSON.stringify({ owner: 'student-1', answers: { 1: 'pending' }, lastSaved: pendingTime }));
+    const progress = draftModule(h).progress.openSession('unit-1');
+    assert.equal(progress.loadProgress()?.answers[1] || null, pendingTime === 5 ? 'pending' : null);
+  }
+});
+
+test('successful completion deletes the draft and writer, while reopening cannot resurrect a migrated old answer', async () => {
+  const base = 'ielts_listening_progress:unit-1';
+  const h = harness({ initial: { ...session, [base]: JSON.stringify({ owner: 'student-1', answers: { 1: 'old' } }) } });
+  const drafts = draftModule(h), old = drafts.progress.openSession('unit-1');
+  assert.equal(old.loadProgress().answers[1], 'old');
+  assert.equal(old.clearProgress(), true);
+  assert.equal(h.localStorage.getItem(draftKey('unit-1')), null);
+  assert.equal(h.localStorage.getItem(draftKey('unit-1') + ':writer'), null);
+  assert.equal(h.localStorage.getItem(base), null);
+  assert.equal(drafts.progress.openSession('unit-1').loadProgress(), null);
+  assert.equal(old.saveProgress({ answers: { 1: 'resurrect' } }), false);
+});
+
+test('draft fallback still blocks competing writers and account changes, but allows renewal for the same account', async () => {
+  const h = harness({ initial: session }), drafts = draftModule(h);
+  const first = drafts.progress.openSession('unit-1');
+  first.saveProgress({ answers: { 1: 'first' } });
+  const second = drafts.progress.openSession('unit-1');
+  assert.equal(first.isIdentityCurrent(), false);
+  assert.equal(first.saveProgress({ answers: { 1: 'overwrite' } }), false);
+  h.localStorage.setItem('token', 'renewed-token');
+  assert.equal(second.isIdentityCurrent(), true);
+  h.localStorage.setItem('user', JSON.stringify({ id: 'student-2' }));
+  assert.equal(second.isIdentityCurrent(), false);
+  assert.equal(second.clearProgress(), false);
+  assert.equal(JSON.parse(h.localStorage.getItem(draftKey('unit-1'))).answers[1], 'first');
+  const quota = harness({ initial: session }), writable = quota.localStorage.setItem;
+  quota.localStorage.setItem = () => { throw new Error('QuotaExceededError'); };
+  const quotaDrafts = draftModule(quota), draft = quotaDrafts.connect('unit-1', () => ({ 1: 'pending' }));
+  await draft.restore(() => false); draft.save();
+  assert.equal(draft.isCurrent(), true);
+  // A newer tab can acquire the shared writer after storage becomes writable.
+  quota.localStorage.setItem = writable;
+  const tabB = harness({ sharedStorage: quota.localStorage });
+  draftModule(tabB).progress.openSession('unit-1');
+  assert.equal(draft.isCurrent(), false);
+  assert.equal(draft.save(), false);
+  assert.equal(JSON.parse(quota.sessionStorage.getItem(draftKey('unit-1'))).answers[1], 'pending');
+});
+
+test('a full primary draft falls back to a newer session copy and survives a reload', () => {
+  const key = draftKey('unit-1');
+  const h = harness({ initial: { ...session, [key]: JSON.stringify({ owner: 'student-1', answers: { 1: 'older' }, lastSaved: Date.now() + 1000 }) } });
+  const setItem = h.localStorage.setItem;
+  h.localStorage.setItem = (name, value) => {
+    if (name === key) throw new Error('QuotaExceededError');
+    return setItem(name, value);
+  };
+  const draft = draftModule(h).progress.openSession('unit-1');
+  assert.equal(draft.saveProgress({ answers: { 1: 'newer' } }), true);
+  assert.equal(draft.loadProgress().answers[1], 'newer');
+  const reload = harness({ sharedStorage: h.localStorage, sharedSessionStorage: h.sessionStorage });
+  assert.equal(draftModule(reload).progress.openSession('unit-1').loadProgress().answers[1], 'newer');
+});
+
+test('unowned and other-account legacy drafts survive cleanup and require explicit ownership before restoration', () => {
+  const base = 'ielts_listening_progress:unit-1';
+  const original = JSON.stringify({ answers: { 1: 'legacy-answer' } });
+  const h = harness({ initial: { ...session, [base]: original } }), drafts = draftModule(h);
+  const draft = drafts.progress.openSession('unit-1');
+  assert.equal(draft.loadProgress(), null);
+  assert.equal(h.localStorage.getItem(base), original);
+  assert.equal(draft.claimProgress(), true);
+  assert.equal(draft.loadProgress().answers[1], 'legacy-answer');
+  assert.equal(h.localStorage.getItem(base), original, 'original is the backup until completion');
+  assert.equal(draft.clearProgress(), true);
+  assert.equal(h.localStorage.getItem(base), null);
+  h.localStorage.setItem(base, JSON.stringify({ owner: 'student-2', answers: { 1: 'someone-else' } }));
+  const current = drafts.progress.openSession('unit-1');
+  assert.equal(current.loadProgress(), null);
+  assert.equal(current.claimProgress(), false);
+  current.saveProgress({ answers: { 1: 'mine' } });
+  current.clearProgress();
+  assert.equal(JSON.parse(h.localStorage.getItem(base)).answers[1], 'someone-else');
+});
+
+test('completed reading and writing drafts are cleaned in both stores while pending writing survives', () => {
+  const reading = 'ielts_reading_progress:unit:1:owner:student-1';
+  const writing = 'ielts_writing_progress:unit:2:owner:student-1';
+  const pending = 'ielts_writing_progress:unit:3:owner:student-1';
+  const h = harness({ initial: { ...session, [reading]: JSON.stringify({ owner: 'student-1', cleared: true, lastSaved: 3 }),
+    [pending]: JSON.stringify({ owner: 'student-1', answerText: 'My essay', lastSaved: 3 }) } });
+  h.sessionStorage.setItem(writing, JSON.stringify({ owner: 'student-1', cleared: true, lastSaved: 3 }));
+  draftModule(h);
+  assert.equal(h.localStorage.getItem(reading), null);
+  assert.equal(h.sessionStorage.getItem(writing), null);
+  assert.equal(JSON.parse(h.localStorage.getItem(pending)).answerText, 'My essay');
+});
+
+test('pre-request account or tab conflicts explain the cause and keep the answer draft', async () => {
+  let requests = 0;
+  const h = harness({ initial: session, fetch: async () => { requests++; return ok({ resultId: 'unexpected' }); } });
+  const exam = ordinaryExam(h), drafts = draftModule(h), draft = drafts.connect('unit-1', () => ({ 1: 'keep' }));
+  await draft.restore(() => false); draft.save();
+  drafts.progress.openSession('unit-1');
+  const state = submitState();
+  await h.submit({ submitFn: () => draft.submit(() => exam.submitAnswers({})), state,
+    routeQuery: { unitId: 'unit-1' }, clearProgress: () => assert.fail('must keep draft'),
+    router: { push: () => assert.fail('must stay on exam') } });
+  assert.equal(requests, 0);
+  assert.match(state.submitErrorMessage.value, /作答会话已变化/);
+  assert.equal(JSON.parse(h.localStorage.getItem(draftKey('unit-1'))).answers[1], 'keep');
+  expectSession(h);
+});
 
 test('shipped ordinary listening and reading submit without unsupported cache headers and enter review', async () => {
   for (const channel of ['listening', 'reading']) {
