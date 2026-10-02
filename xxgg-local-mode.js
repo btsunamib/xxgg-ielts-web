@@ -494,6 +494,10 @@
     return jsonResponse({ code: '200', data: data, msg: msg || 'OK' });
   }
 
+  function fail(msg, status) {
+    return jsonResponse({ code: str(status), msg: msg, data: null }, status);
+  }
+
   // Last-resort benign payload: satisfies `.list` / `.records` / `.days`
   // readers and, above all, never carries code 401.
   function safeEnvelope() {
@@ -594,50 +598,38 @@
     return str(v).trim().toLowerCase().replace(/\s+/g, ' ');
   }
 
-  function leadingLetter(v) {
-    var m = normalizeAnswer(v).match(/^([a-z])/);
-    return m ? m[1] : '';
+  function isMultipleChoice(group) {
+    var type = normalizeAnswer(group && group.type);
+    return type === 'multiple-choice' || type === 'multi-select' ||
+      !!(group && (group.multipleChoice === true || group.multiSelect === true));
   }
 
-  function lettersOnly(v) {
-    return normalizeAnswer(v).replace(/[^a-z]/g, '');
+  function singleMatch(u, r, group) {
+    if (!r) return false;
+    if (u === r) return true;
+    // Compare ordinary decimal numbers without accepting arbitrary JS literals.
+    var decimal = /^[+-]?\d+(?:\.\d+)?$/;
+    if (decimal.test(u) && decimal.test(r) && Number(u) === Number(r)) return true;
+
+    // Only multiple-choice answers may reorder option letters. Applying this
+    // to words accepted misspellings such as "stone" for "notes"; comparing
+    // just the first letter also accepted incomplete selections.
+    if (!isMultipleChoice(group)) return false;
+    var labels = /^[a-z](?:[a-z\s,;&/]*[a-z])?$/;
+    if (!labels.test(u) || !labels.test(r)) return false;
+    var ul = u.replace(/[\s,;&/]/g, '');
+    var rl = r.replace(/[\s,;&/]/g, '');
+    if (/(.).*\1/.test(ul) || /(.).*\1/.test(rl)) return false;
+    return ul.split('').sort().join('') === rl.split('').sort().join('');
   }
 
   function answersMatch(userAnswer, rightAnswer, group) {
     var u = normalizeAnswer(userAnswer);
     var r = normalizeAnswer(rightAnswer);
     if (!r) return false;
-    if (u === r) return true;
-
-    var un = Number(u);
-    var rn = Number(r);
-    if (isFinite(un) && isFinite(rn) && u !== '' && r !== '' && un === rn) return true;
-
-    var isMulti = false;
-    if (group) {
-      var t = normalizeAnswer(group.type);
-      if (t.indexOf('multi') >= 0 || t.indexOf('multiple') >= 0) isMulti = true;
-      if (group.multipleChoice === true || group.multiSelect === true) isMulti = true;
-    }
-
-    var rl = lettersOnly(r);
-    var ul = lettersOnly(u);
-    if (rl && ul) {
-      // Single letter answer (classic A/B/C/D multiple choice).
-      if (rl.length === 1) {
-        if (leadingLetter(u) === rl) return true;
-      }
-      // Multiple letters: compare as an unordered set ("A,C" vs "CA").
-      if (rl.length > 1 && rl.length <= 6) {
-        var a = rl.split('').sort().join('');
-        var b = ul.split('').sort().join('');
-        if (a === b) return true;
-      }
-    }
-    if (isMulti) {
-      var um = leadingLetter(u);
-      var rm = leadingLetter(r);
-      if (um && rm && um === rm) return true;
+    var alternatives = r.split(isMultipleChoice(group) ? /[|]/ : /[|;]/);
+    for (var i = 0; i < alternatives.length; i++) {
+      if (singleMatch(u, alternatives[i].trim(), group)) return true;
     }
     return false;
   }
@@ -702,8 +694,9 @@
 
   // The review UI reads `state ?? correct ?? isCorrect` through
   // `La(e){return e===!0||e===1||e==="1"||e==="true"}` -> emit a boolean.
-  function gradeExamParts(examParts, submittedParts) {
+  function gradeExamParts(examParts, submittedParts, unitId) {
     var index = buildAnswerIndex(submittedParts);
+    var cachedAnswers = safe(function () { return JSON.parse(lsGet('xxgg.answers.v1') || '{}'); }, {}) || {};
     var parts = asArray(examParts);
     var outParts = [];
     var details = [];
@@ -731,18 +724,15 @@
           var right = '';
           if (q.rightAnswer !== undefined && q.rightAnswer !== null) right = q.rightAnswer;
           else if (q.correctAnswer !== undefined && q.correctAnswer !== null) right = q.correctAnswer;
-          // Fallback 1: answer cache harvested from a real server-graded attempt.
+          // Support the structured cache owned by server-compose and legacy
+          // flat entries. Unit/qNumber keys must use the original unit ID.
           if (!str(right)) {
-            try {
-              var aCache = null;
-              try { aCache = JSON.parse(localStorage.getItem('xxgg.answers.v1') || '{}'); } catch (e) { aCache = null; }
-              if (aCache) {
-                var k1 = str(q.questionId || q.id);
-                var k2 = str(pid) + ':' + str(qn);
-                if (k1 && aCache[k1]) right = aCache[k1];
-                else if (aCache[k2]) right = aCache[k2];
-              }
-            } catch (e) {}
+            var qid = str(q.questionId || q.id);
+            var uid = str(part.originalUnitId || part.unitId || unitId || '');
+            var byId = cachedAnswers.byQuestionId || {};
+            var byUnitQ = cachedAnswers.byUnitQ || {};
+            right = byId[qid] || byUnitQ[uid + '::' + qn] ||
+              cachedAnswers[qid] || cachedAnswers[pid + ':' + qn] || '';
           }
           // Fallback 2: extract the answer from the public Chinese analysis text.
           if (!str(right) && window.__xxggAnswerExtract && typeof window.__xxggAnswerExtract.extract === 'function') {
@@ -752,7 +742,7 @@
             } catch (e) {}
           }
           var graded = !!str(right);
-          var isCorrect = graded && answersMatch(ua, right, g);
+          var isCorrect = graded ? answersMatch(ua, right, g) : null;
           q.userAnswer = str(ua);
           q.isCorrect = isCorrect;
           q.state = isCorrect;
@@ -938,11 +928,12 @@
           if (out.length >= 400) break;
         }
       }
-      unitsCache[key] = out;
+      if (out.length) unitsCache[key] = out;
+      else delete unitsCache[key];
       return out;
     }, function () {
-      unitsCache[key] = [];
-      return unitsCache[key];
+      delete unitsCache[key];
+      return [];
     });
   }
 
@@ -1026,6 +1017,7 @@ function codeByPartFor(unitId) {
       cands.push(body.elapsedSeconds, body.elapsed, body.durationSeconds);
     }
     for (var i = 0; i < cands.length; i++) {
+      if (cands[i] === null || cands[i] === undefined || str(cands[i]).trim() === '') continue;
       var v = Number(cands[i]);
       if (isFinite(v) && v >= 0) return Math.round(v);
     }
@@ -1076,7 +1068,8 @@ function codeByPartFor(unitId) {
 
       return ensureExam(unitId).then(function (exam) {
         var examParts = exam && isArray(exam.parts) ? exam.parts : [];
-        var graded = gradeExamParts(examParts, b.parts);
+        if (!examParts.length) return fail('PRACTICE_EXAM_NOT_READY', 503);
+        var graded = gradeExamParts(examParts, b.parts, unitId);
         var seq = nextSeq();
         var resultId = 'local-att-' + seq;
         var unitTitle = str((exam && (exam.title || exam.unitTitle)) || b.unitTitle || b.title || unitId);
@@ -2127,18 +2120,30 @@ var seq = nextSeq();
     });
   }
 
+  function compositionPartsComplete(comp, parts) {
+    var slots = asArray(comp && comp.slots);
+    if (!slots.length || !asArray(parts).length) return false;
+    var units = {};
+    for (var i = 0; i < parts.length; i++) units[str(parts[i] && (parts[i].originalUnitId || parts[i].unitId))] = 1;
+    return slots.every(function (slot) { return !!units[str(slot && (slot.unitId || slot.partId))]; });
+  }
+
   function resolveCompositionParts(id) {
     var comp = isPlainObject(store.compositions[id]) ? store.compositions[id] : null;
     if (!comp) return Promise.resolve(null);
-    if (isArray(comp.parts) && comp.parts.length) return Promise.resolve(comp.parts);
-    if (compositionExamCache[id] && isArray(compositionExamCache[id].parts) &&
-        compositionExamCache[id].parts.length) {
+    if (compositionPartsComplete(comp, comp.parts)) return Promise.resolve(comp.parts);
+    if (compositionExamCache[id] && compositionPartsComplete(comp, compositionExamCache[id].parts)) {
       return Promise.resolve(compositionExamCache[id].parts);
     }
     var slots = asArray(comp.slots);
+    if (!slots.length) return Promise.resolve(null);
     return Promise.all(slots.map(function (s) {
       return ensureExam(str(s && (s.unitId || s.partId)));
     })).then(function (exams) {
+      for (var ei = 0; ei < exams.length; ei++) {
+        var sourceParts = exams[ei] && asArray(exams[ei].parts);
+        if (!sourceParts || !sourceParts.length || sourceParts.some(function (part) { return !partIdOf(part); })) return null;
+      }
       var parts = [];
       for (var i = 0; i < slots.length; i++) {
         var slot = slots[i] || {};
@@ -2189,11 +2194,10 @@ var seq = nextSeq();
       };
     }
 
-    if (!comp) {
-      return Promise.resolve(ok(payload([])));
-    }
+    if (!comp) return Promise.resolve(fail('MIXED_PRACTICE_COMPOSITION_NOT_FOUND', 404));
     return resolveCompositionParts(id).then(function (parts) {
-      var out = payload(parts || []);
+      if (!parts || !parts.length) return fail('MIXED_PRACTICE_EXAM_NOT_READY', 503);
+      var out = payload(parts);
       compositionExamCache[id] = out;
       return ok(out);
     });
@@ -2205,6 +2209,8 @@ var seq = nextSeq();
       var b = isPlainObject(body) ? body : {};
       return resolveCompositionParts(id).then(function (parts) {
         var comp = isPlainObject(store.compositions[id]) ? store.compositions[id] : null;
+        if (!comp) return fail('MIXED_PRACTICE_COMPOSITION_NOT_FOUND', 404);
+        if (!parts || !parts.length) return fail('MIXED_PRACTICE_EXAM_NOT_READY', 503);
         // Mixed submit body is {channel, parts, timer?} - no unitId/compositionId.
         var graded = gradeExamParts(parts || [], b.parts);
         var seq = nextSeq();
@@ -2245,7 +2251,9 @@ var seq = nextSeq();
     var id = decodeURIComponent(str(ctx.params[0]));
     var comp = isPlainObject(store.compositions[id]) ? store.compositions[id] : null;
 
+    if (!comp) return Promise.resolve(fail('MIXED_PRACTICE_COMPOSITION_NOT_FOUND', 404));
     return resolveCompositionParts(id).then(function (parts) {
+      if (!parts || !parts.length) return fail('MIXED_PRACTICE_REVIEW_NOT_READY', 503);
       var found = null;
       var attempts = sortedAttempts();
       for (var i = 0; i < attempts.length; i++) {

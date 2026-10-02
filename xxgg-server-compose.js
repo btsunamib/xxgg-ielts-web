@@ -170,7 +170,7 @@
       apiBase: function () { return apiBase(); },
       hasRealSession: hasRealSession,
       // Used by xxgg-compose-picker.js to list candidates for the panel.
-      listUnits: function (channel) { return loadUnits(channel); },
+      listUnits: function (channel, refresh) { return loadUnits(channel, refresh); },
       customSelection: function () { return cloneJson(readCustomSelection()); },
       store: function () { return cloneJson(composeStore); },
       answers: function () { return cloneJson(answerCache); },
@@ -551,61 +551,38 @@
     return str(v).trim().toLowerCase().replace(/\s+/g, ' ');
   }
 
-  function leadingLetter(v) {
-    var m = normalizeAnswer(v).match(/^([a-z])/);
-    return m ? m[1] : '';
-  }
-
-  function lettersOnly(v) {
-    return normalizeAnswer(v).replace(/[^a-z]/g, '');
+  function isMultipleChoice(group) {
+    var type = normalizeAnswer(group && group.type);
+    return type === 'multiple-choice' || type === 'multi-select' ||
+      !!(group && (group.multipleChoice === true || group.multiSelect === true));
   }
 
   function singleMatch(u, r, group) {
     if (!r) return false;
     if (u === r) return true;
+    // Compare ordinary decimal numbers without accepting arbitrary JS literals.
+    var decimal = /^[+-]?\d+(?:\.\d+)?$/;
+    if (decimal.test(u) && decimal.test(r) && Number(u) === Number(r)) return true;
 
-    var un = Number(u);
-    var rn = Number(r);
-    if (isFinite(un) && isFinite(rn) && u !== '' && r !== '' && un === rn) return true;
-
-    var isMulti = false;
-    if (group) {
-      var t = normalizeAnswer(group.type);
-      if (t.indexOf('multi') >= 0 || t.indexOf('multiple') >= 0) isMulti = true;
-      if (group.multipleChoice === true || group.multiSelect === true) isMulti = true;
-    }
-
-    var rl = lettersOnly(r);
-    var ul = lettersOnly(u);
-    if (rl && ul) {
-      if (rl.length === 1) {
-        if (leadingLetter(u) === rl) return true;
-      }
-      if (rl.length > 1 && rl.length <= 6) {
-        var a = rl.split('').sort().join('');
-        var b = ul.split('').sort().join('');
-        if (a === b) return true;
-      }
-    }
-    if (isMulti) {
-      var um = leadingLetter(u);
-      var rm = leadingLetter(r);
-      if (um && rm && um === rm) return true;
-    }
-    return false;
+    // Only multiple-choice answers may reorder option letters. Applying this
+    // to words accepted misspellings such as "stone" for "notes"; comparing
+    // just the first letter also accepted incomplete selections.
+    if (!isMultipleChoice(group)) return false;
+    var labels = /^[a-z](?:[a-z\s,;&/]*[a-z])?$/;
+    if (!labels.test(u) || !labels.test(r)) return false;
+    var ul = u.replace(/[\s,;&/]/g, '');
+    var rl = r.replace(/[\s,;&/]/g, '');
+    if (/(.).*\1/.test(ul) || /(.).*\1/.test(rl)) return false;
+    return ul.split('').sort().join('') === rl.split('').sort().join('');
   }
 
-  // A server `rightAnswer` may hold several accepted alternatives separated by
-  // "|" or ";". Try each one.
   function answersMatch(userAnswer, rightAnswer, group) {
     var u = normalizeAnswer(userAnswer);
     var r = normalizeAnswer(rightAnswer);
     if (!r) return false;
-    if (singleMatch(u, r, group)) return true;
-    var alts = r.split(/[|;]/);
-    for (var i = 1; i < alts.length; i++) {
-      var a = alts[i].trim();
-      if (a && singleMatch(u, a, group)) return true;
+    var alternatives = r.split(isMultipleChoice(group) ? /[|]/ : /[|;]/);
+    for (var i = 0; i < alternatives.length; i++) {
+      if (singleMatch(u, alternatives[i].trim(), group)) return true;
     }
     return false;
   }
@@ -800,8 +777,9 @@
     return 99;
   }
 
-  function loadUnits(channel) {
+  function loadUnits(channel, refresh) {
     var key = normalizeChannel(channel) || 'reading';
+    if (refresh === true) delete unitsCache[key];
     if (unitsCache[key]) return unitsCache[key];
 
     var albumsUrl = apiBase() + '/practice/v1/albums';
@@ -849,8 +827,9 @@
             });
           }
         }
+        if (!out.length) delete unitsCache[key];
         return out;
-      }, function () { return []; });
+      }, function () { delete unitsCache[key]; return []; });
 
     return unitsCache[key];
   }
@@ -946,6 +925,12 @@
     }
 
     return Promise.all(jobs).then(function (exams) {
+      // A temporary source failure must not become a permanently cached short
+      // paper. Keep successful source exams cached and retry the missing ones.
+      for (var ei = 0; ei < exams.length; ei++) {
+        var sourceParts = exams[ei] && asArray(exams[ei].parts);
+        if (!sourceParts || !sourceParts.length || sourceParts.some(function (part) { return !partIdOf(part); })) return null;
+      }
       var parts = [];
       var originalParents = [];
       var partUnits = {};
@@ -1302,31 +1287,9 @@
   function handleMixedExam(ctx) {
     var id = decodeURIComponent(str(ctx.params[0]));
     var comp = getComposition(id);
-    if (!comp) {
-      return Promise.resolve(ok({
-        id: id,
-        compositionId: id,
-        unitId: id,
-        setId: id,
-        sessionType: 'mixed',
-        title: CN_MIXED_TITLE,
-        channel: '',
-        parts: [],
-        originalParents: []
-      }));
-    }
+    if (!comp) return Promise.resolve(fail('MIXED_PRACTICE_COMPOSITION_NOT_FOUND', 404));
     return ensureCompositionExam(id).then(function (exam) {
-      if (!exam) return ok({
-        id: id,
-        compositionId: id,
-        unitId: id,
-        setId: id,
-        sessionType: 'mixed',
-        title: CN_MIXED_TITLE,
-        channel: str(comp.channel || ''),
-        parts: [],
-        originalParents: []
-      });
+      if (!exam) return fail('MIXED_PRACTICE_EXAM_NOT_READY', 503);
       // Persist the slim store as soon as we know this composition is live, so
       // a later reload can still rebuild the paper from its slots.
       safe(function () { saveComposeStore(); }, null);
@@ -1529,202 +1492,243 @@
     });
   }
 
+  var mixedSubmissions = {};
   function handleMixedAttempts(ctx) {
     var id = decodeURIComponent(str(ctx.params[0]));
     return readBody(ctx.input, ctx.init).then(function (body) {
-      var b = isPlainObject(body) ? body : {};
-      var comp = getComposition(id);
-      if (!comp) {
-        lsSet('xxgg.compose.lastSubmit', JSON.stringify({
-          at: nowIso(), channel: '', ok: false, phase: 'no-composition',
-          detail: '\u672c\u5730\u627e\u4e0d\u5230\u8fd9\u4efd\u7ec4\u5377\u8bb0\u5f55\uff08compositionId=' + id +
-            '\uff09\u3002\u8bf7\u91cd\u65b0\u7ec4\u5377\u540e\u518d\u8bd5\u3002'
-        }));
-        return fail('MIXED_PRACTICE_COMPOSITION_NOT_FOUND', 500);
-      }
-      var channel = normalizeChannel(b.channel) || normalizeChannel(comp.channel) || 'reading';
-      var submitted = asArray(b.parts);
+      var signature = JSON.stringify({ channel: body && body.channel, parts: body && body.parts });
+      var current = mixedSubmissions[id];
+      if (current) return current.signature === signature ? current.promise.then(function (res) { return res.clone(); })
+        : fail('MIXED_PRACTICE_SUBMISSION_IN_PROGRESS', 409);
+      var pending = Promise.resolve().then(function () { return performMixedAttempts(id, body); });
+      mixedSubmissions[id] = { signature: signature, promise: pending };
+      return pending.then(function (result) { delete mixedSubmissions[id]; return result.clone(); }, function (error) {
+        delete mixedSubmissions[id]; throw error;
+      });
+    });
+  }
 
-      // Mark that the submit request actually reached this module, before any
-      // upstream work. If the panel later shows this "start" text and nothing
-      // else, the handler began but never finished (client aborted / upstream
-      // hung) - which is a different problem from "the handler failed".
+  function performMixedAttempts(id, body) {
+    var b = isPlainObject(body) ? body : {};
+    var comp = getComposition(id);
+    if (!comp) {
       lsSet('xxgg.compose.lastSubmit', JSON.stringify({
-        at: nowIso(), channel: channel, ok: false, phase: 'start',
-        detail: '\u6536\u5230\u63d0\u4ea4\u8bf7\u6c42\uff08\u7bc7\u76ee ' + submitted.length +
-          '\uff09\uff0c\u6b63\u5728\u5411\u670d\u52a1\u7aef\u63d0\u4ea4\u2026'
+        at: nowIso(), channel: '', ok: false, phase: 'no-composition',
+        detail: '\u672c\u5730\u627e\u4e0d\u5230\u8fd9\u4efd\u7ec4\u5377\u8bb0\u5f55\uff08compositionId=' + id +
+          '\uff09\u3002\u8bf7\u91cd\u65b0\u7ec4\u5377\u540e\u518d\u8bd5\u3002'
       }));
+      return fail('MIXED_PRACTICE_COMPOSITION_NOT_FOUND', 500);
+    }
+    var channel = normalizeChannel(b.channel) || normalizeChannel(comp.channel) || 'reading';
+    var submitted = asArray(b.parts);
 
-      return ensureCompositionExam(id).then(function (exam) {
-        var examParts = exam && isArray(exam.parts) ? exam.parts : [];
-        var resolveUnit = buildUnitResolver(comp, examParts);
+    // Mark that the submit request actually reached this module, before any
+    // upstream work. If the panel later shows this "start" text and nothing
+    // else, the handler began but never finished (client aborted / upstream
+    // hung) - which is a different problem from "the handler failed".
+    lsSet('xxgg.compose.lastSubmit', JSON.stringify({
+      at: nowIso(), channel: channel, ok: false, phase: 'start',
+      detail: '\u6536\u5230\u63d0\u4ea4\u8bf7\u6c42\uff08\u7bc7\u76ee ' + submitted.length +
+        '\uff09\uff0c\u6b63\u5728\u5411\u670d\u52a1\u7aef\u63d0\u4ea4\u2026'
+    }));
 
-        // 1. split the submitted parts by their source originalUnitId
-        var buckets = {};
-        var order = [];
-        var unknown = [];
-        for (var i = 0; i < submitted.length; i++) {
-          var part = submitted[i] || {};
-          var uid = resolveUnit(part);
-          if (!uid) { unknown.push(part); continue; }
-          if (!buckets[uid]) { buckets[uid] = []; order.push(uid); }
-          buckets[uid].push(part);
+    return ensureCompositionExam(id).then(function (exam) {
+      var examParts = exam && isArray(exam.parts) ? exam.parts : [];
+      if (!examParts.length) return fail('MIXED_PRACTICE_EXAM_NOT_READY', 503);
+      var submittedIds = {};
+      for (var spi = 0; spi < submitted.length; spi++) {
+        var submittedId = partIdOf(submitted[spi]);
+        if (!submittedId || submittedIds[submittedId]) return fail('MIXED_PRACTICE_INVALID_PARTS', 422);
+        submittedIds[submittedId] = 1;
+      }
+      if (submitted.length !== examParts.length || examParts.some(function (part) { return !submittedIds[partIdOf(part)]; })) {
+        return fail('MIXED_PRACTICE_NOT_ENOUGH_PARTS', 422);
+      }
+      var resolveUnit = buildUnitResolver(comp, examParts);
+
+      // 1. split the submitted parts by their source originalUnitId
+      var buckets = {};
+      var order = [];
+      var unknown = [];
+      for (var i = 0; i < submitted.length; i++) {
+        var part = submitted[i] || {};
+        var uid = resolveUnit(part);
+        if (!uid) { unknown.push(part); continue; }
+        if (!buckets[uid]) { buckets[uid] = []; order.push(uid); }
+        buckets[uid].push(part);
+      }
+
+      if (!order.length) {
+        var shape = '';
+        try {
+          var sp = unknown[0] || submitted[0] || {};
+          shape = '  \u9996\u4e2a\u7bc7\u76ee id=' + str(sp.id) + ' partId=' + str(sp.partId) +
+            ' keys=' + Object.keys(sp).slice(0, 10).join(',');
+        } catch (e) { shape = ''; }
+        lsSet('xxgg.compose.lastSubmit', JSON.stringify({
+          at: nowIso(), channel: channel, ok: false, phase: 'no-unit',
+          detail: '\u63d0\u4ea4\u7684 ' + submitted.length +
+            ' \u4e2a\u7bc7\u76ee\u4e00\u4e2a\u90fd\u6ca1\u80fd\u6620\u5c04\u56de\u5355\u5143\uff08\u672a\u8bc6\u522b ' +
+            unknown.length + ' \u4e2a\uff09\u3002' + shape
+        }));
+        return fail('MIXED_PRACTICE_NOT_ENOUGH_PARTS', 500);
+      }
+
+      if (unknown.length) return fail('MIXED_PRACTICE_UNKNOWN_PART', 422);
+      var accepted = isPlainObject(comp.acceptedSubmissions) ? comp.acceptedSubmissions : {};
+      comp.acceptedSubmissions = accepted;
+
+      // 2. submit every unit subset in PARALLEL.
+      //    The app's request layer aborts a mixed submit at 15s, and a
+      //    listening paper is 4 units. Serial submits plus 4 review
+      //    harvests cannot fit in that budget; parallel wall time is
+      //    max() instead of sum(), which is what makes listening work.
+      var jobPromises = [];
+      for (var oi = 0; oi < order.length; oi++) {
+        jobPromises.push((function (uid) {
+          var signature = JSON.stringify({ channel: channel, parts: buckets[uid] });
+          var saved = accepted[uid];
+          if (saved && saved.signature === signature && saved.resultId) {
+            return Promise.resolve({ unitId: uid, ok: true, resultId: saved.resultId });
+          }
+          return submitUnitSubset(uid, channel, buckets[uid], comp).then(function (r) {
+            if (r.ok) {
+              accepted[uid] = { signature: signature, resultId: r.resultId };
+              composeStore.doneUnits[uid] = 1;
+              // Save each accepted result immediately. A later unit or review
+              // failure must not lose it or create duplicate server attempts.
+              saveComposeStore();
+            }
+            return r;
+          }, function () {
+            return { unitId: uid, ok: false, resultId: '' };
+          });
+        })(order[oi]));
+      }
+
+      return Promise.all(jobPromises).then(function (jobs) {
+        var unitResultIds = [];
+        var failures = [];
+        for (var j = 0; j < jobs.length; j++) {
+          if (jobs[j].ok && jobs[j].resultId) unitResultIds.push(jobs[j].resultId);
+          else failures.push({ unitId: jobs[j].unitId, reason: 'submit_failed' });
+        }
+        for (var u = 0; u < unknown.length; u++) {
+          failures.push({ unitId: '', partId: partIdOf(unknown[u]), reason: 'unknown_unit' });
         }
 
-        if (!order.length) {
-          var shape = '';
-          try {
-            var sp = unknown[0] || submitted[0] || {};
-            shape = '  \u9996\u4e2a\u7bc7\u76ee id=' + str(sp.id) + ' partId=' + str(sp.partId) +
-              ' keys=' + Object.keys(sp).slice(0, 10).join(',');
-          } catch (e) { shape = ''; }
+        if (!unitResultIds.length) {
+          var failDetail = composeFailureDetail(jobs, order, unknown, channel, submitted.length);
+          composeToast(failDetail);
           lsSet('xxgg.compose.lastSubmit', JSON.stringify({
-            at: nowIso(), channel: channel, ok: false, phase: 'no-unit',
-            detail: '\u63d0\u4ea4\u7684 ' + submitted.length +
-              ' \u4e2a\u7bc7\u76ee\u4e00\u4e2a\u90fd\u6ca1\u80fd\u6620\u5c04\u56de\u5355\u5143\uff08\u672a\u8bc6\u522b ' +
-              unknown.length + ' \u4e2a\uff09\u3002' + shape
+            at: nowIso(), channel: channel, ok: false, detail: failDetail
           }));
-          return fail('MIXED_PRACTICE_NOT_ENOUGH_PARTS', 500);
+          // If the upstream refused every unit with an auth-shaped business
+          // code, say so instead of a generic 500: an account that does not
+          // own the entitlement cannot have these attempts accepted. Use the
+          // one shape the app renders as "no permission" and never as an
+          // expired session.
+          var refused = null;
+          for (var fj = 0; fj < jobs.length; fj++) {
+            var jr = jobs[fj];
+            if (!jr) continue;
+            var c = str(jr.code);
+            if (c === '401' || c === '403' || c === '10401' || c === '10403') { refused = jr; break; }
+          }
+          if (refused) {
+            return jsonResponse({
+              code: 'MIXED_PRACTICE_ENTITLEMENT_REQUIRED',
+              msg: 'MIXED_PRACTICE_ENTITLEMENT_REQUIRED',
+              data: {
+                error: 'MIXED_PRACTICE_ENTITLEMENT_REQUIRED',
+                upstreamCode: str(refused.code),
+                upstreamError: str(refused.dataError),
+                upstreamMsg: str(refused.msg).slice(0, 200)
+              }
+            }, 403);
+          }
+          return fail('MIXED_PRACTICE_RUNTIME_NOT_READY', 500);
         }
 
-        // 2. submit every unit subset in PARALLEL.
-        //    The app's request layer aborts a mixed submit at 15s, and a
-        //    listening paper is 4 units. Serial submits plus 4 review
-        //    harvests cannot fit in that budget; parallel wall time is
-        //    max() instead of sum(), which is what makes listening work.
-        var jobPromises = [];
-        for (var oi = 0; oi < order.length; oi++) {
-          jobPromises.push((function (uid) {
-            return submitUnitSubset(uid, channel, buckets[uid], comp).then(function (r) {
-              return r;
-            }, function () {
-              return { unitId: uid, ok: false, resultId: '' };
-            });
-          })(order[oi]));
+        if (failures.length) {
+          lsSet('xxgg.compose.lastSubmit', JSON.stringify({
+            at: nowIso(), channel: channel, ok: false, phase: 'partial-submit',
+            detail: composeFailureDetail(jobs, order, unknown, channel, submitted.length)
+          }));
+          return fail('MIXED_PRACTICE_PARTIAL_SUBMISSION', 503);
         }
 
-        return Promise.all(jobPromises).then(function (jobs) {
-          var unitResultIds = [];
-          var failures = [];
-          for (var j = 0; j < jobs.length; j++) {
-            if (jobs[j].ok && jobs[j].resultId) unitResultIds.push(jobs[j].resultId);
-            else failures.push({ unitId: jobs[j].unitId, reason: 'submit_failed' });
-          }
-          for (var u = 0; u < unknown.length; u++) {
-            failures.push({ unitId: '', partId: partIdOf(unknown[u]), reason: 'unknown_unit' });
-          }
+        // 4. harvest rightAnswer for every resultId, in parallel for the
+        //    same 15s budget.
+        var harvested = 0;
+        var harvestJobs = [];
+        var unitResults = jobs.filter(function (job) { return job.ok && job.resultId; });
+        for (var h = 0; h < unitResults.length; h++) {
+          harvestJobs.push((function (job) {
+            var rid = job.resultId;
+            var url = apiBase() + '/practice/v1/results/' + encodeURIComponent(rid) + '/review';
+            return requestUpstream(url, { method: 'GET' }, UPSTREAM_TIMEOUT_MS)
+              .then(function (res) {
+                if (!res || !res.ok) return;
+                harvested += harvestFromReview(res.data, job.unitId, comp.partUnits, comp.groupUnits);
+              }, function () { /* ignore */ });
+          })(unitResults[h]));
+        }
 
-          if (!unitResultIds.length) {
-            var failDetail = composeFailureDetail(jobs, order, unknown, channel, submitted.length);
-            composeToast(failDetail);
-            lsSet('xxgg.compose.lastSubmit', JSON.stringify({
-              at: nowIso(), channel: channel, ok: false, detail: failDetail
-            }));
-            // If the upstream refused every unit with an auth-shaped business
-            // code, say so instead of a generic 500: an account that does not
-            // own the entitlement cannot have these attempts accepted. Use the
-            // one shape the app renders as "no permission" and never as an
-            // expired session.
-            var refused = null;
-            for (var fj = 0; fj < jobs.length; fj++) {
-              var jr = jobs[fj];
-              if (!jr) continue;
-              var c = str(jr.code);
-              if (c === '401' || c === '403' || c === '10401' || c === '10403') { refused = jr; break; }
-            }
-            if (refused) {
-              return jsonResponse({
-                code: 'MIXED_PRACTICE_ENTITLEMENT_REQUIRED',
-                msg: 'MIXED_PRACTICE_ENTITLEMENT_REQUIRED',
-                data: {
-                  error: 'MIXED_PRACTICE_ENTITLEMENT_REQUIRED',
-                  upstreamCode: str(refused.code),
-                  upstreamError: str(refused.dataError),
-                  upstreamMsg: str(refused.msg).slice(0, 200)
-                }
-              }, 403);
-            }
-            return fail('MIXED_PRACTICE_RUNTIME_NOT_READY', 500);
-          }
+        return Promise.all(harvestJobs).then(function () {
+          // 5. persist the answer cache
+          var saved = saveAnswers();
 
-          // 4. harvest rightAnswer for every resultId, in parallel for the
-          //    same 15s budget.
-          var harvested = 0;
-          var harvestJobs = [];
-          var unitResults = jobs.filter(function (job) { return job.ok && job.resultId; });
-          for (var h = 0; h < unitResults.length; h++) {
-            harvestJobs.push((function (job) {
-              var rid = job.resultId;
-              var url = apiBase() + '/practice/v1/results/' + encodeURIComponent(rid) + '/review';
-              return requestUpstream(url, { method: 'GET' }, UPSTREAM_TIMEOUT_MS)
-                .then(function (res) {
-                  if (!res || !res.ok) return;
-                  harvested += harvestFromReview(res.data, job.unitId, comp.partUnits, comp.groupUnits);
-                }, function () { /* ignore */ });
-            })(unitResults[h]));
+          // 6. grade the composed paper locally from the harvested answers
+          var graded = gradeComposition(examParts, submitted);
+
+          comp.attempt = {
+            submittedAt: nowIso(),
+            elapsedSeconds: elapsedFromTimer(b.timer, b),
+            channel: channel,
+            resultId: unitResultIds[0],
+            unitResultIds: unitResultIds,
+            unitResults: unitResults.map(function (job) { return { unitId: job.unitId, resultId: job.resultId }; }),
+            failures: failures,
+            parts: graded.parts,
+            details: graded.details,
+            total: graded.total,
+            correct: graded.correct,
+            accuracy: graded.accuracy
+          };
+          comp.attempt.missingAnswers = missingAnswers(graded);
+          comp.lastAttemptId = unitResultIds[0];
+          saveComposeStore();
+
+          if (webCfg.debug) {
+            safe(function () {
+              console.info('[xxgg-server-compose] graded', {
+                compositionId: id,
+                unitResultIds: unitResultIds.length,
+                harvested: harvested,
+                answersCached: answerCount(),
+                cacheSaved: saved,
+                total: graded.total,
+                correct: graded.correct
+              });
+            }, null);
           }
 
-          return Promise.all(harvestJobs).then(function () {
-            // 5. persist the answer cache
-            var saved = saveAnswers();
+          lsSet('xxgg.compose.lastSubmit', JSON.stringify({
+            at: nowIso(), channel: channel, ok: true, detail: ''
+          }));
 
-            // 6. grade the composed paper locally from the harvested answers
-            var graded = gradeComposition(examParts, submitted);
-
-            // Mark the source units done so `onlyUndone` can honour them.
-            var pu = isPlainObject(comp.partUnits) ? comp.partUnits : {};
-            for (var k in pu) {
-              if (!has(pu, k)) continue;
-              if (pu[k]) composeStore.doneUnits[str(pu[k])] = 1;
-            }
-
-            comp.attempt = {
-              submittedAt: nowIso(),
-              elapsedSeconds: elapsedFromTimer(b.timer, b),
-              channel: channel,
-              resultId: unitResultIds[0],
-              unitResultIds: unitResultIds,
-              unitResults: unitResults.map(function (job) { return { unitId: job.unitId, resultId: job.resultId }; }),
-              failures: failures,
-              parts: graded.parts,
-              details: graded.details,
-              total: graded.total,
-              correct: graded.correct,
-              accuracy: graded.accuracy
-            };
-            comp.attempt.missingAnswers = missingAnswers(graded);
-            comp.lastAttemptId = unitResultIds[0];
-            saveComposeStore();
-
-            if (webCfg.debug) {
-              safe(function () {
-                console.info('[xxgg-server-compose] graded', {
-                  compositionId: id,
-                  unitResultIds: unitResultIds.length,
-                  harvested: harvested,
-                  answersCached: answerCount(),
-                  cacheSaved: saved,
-                  total: graded.total,
-                  correct: graded.correct
-                });
-              }, null);
-            }
-
-            lsSet('xxgg.compose.lastSubmit', JSON.stringify({
-              at: nowIso(), channel: channel, ok: true, detail: ''
-            }));
-
-            // 7. EXACT response shape the app requires.
-            return ok({
-              compositionId: id,
-              status: 'submitted',
-              resultId: unitResultIds[0],
-              unitResultIds: unitResultIds
-            });
+          // 7. EXACT response shape the app requires.
+          return ok({
+            compositionId: id,
+            status: 'submitted',
+            resultId: unitResultIds[0],
+            unitResultIds: unitResultIds
           });
         });
       });
     });
+
   }
 
   function elapsedFromTimer(timer, body) {
@@ -1736,6 +1740,7 @@
       cands.push(body.elapsedSeconds, body.elapsed, body.durationSeconds);
     }
     for (var i = 0; i < cands.length; i++) {
+      if (cands[i] === null || cands[i] === undefined || str(cands[i]).trim() === '') continue;
       var v = Number(cands[i]);
       if (isFinite(v) && v >= 0) return Math.round(v);
     }
