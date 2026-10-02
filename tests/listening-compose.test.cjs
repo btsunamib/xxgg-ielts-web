@@ -173,9 +173,147 @@ function unitPart(i, graded = false) {
   const rightAnswer = `answer-${i}`;
   return { id: `part-${i}`, partNum: `Part ${i}`, groups: [{ id: `group-${i}`, type: 'fill-in-blank', questions: [{
     id: `question-${i}`, questionId: `question-${i}`, qNumber,
-    ...(graded ? { rightAnswer } : {}),
+    rightAnswer: graded ? rightAnswer : null, state: null, userAnswer: null,
   }] }] };
 }
+
+function reviewState(review) {
+  const ctx = vm.createContext({ Tn: q => q.questionId ? q : null });
+  vm.runInContext(section(reviewSource, 'function At(e)', 'function Tu(e,a')
+    + '\nglobalThis.state=Pa();globalThis.merge=Eu;', ctx);
+  ctx.merge(ctx.state, { resultParts: review.parts, resultDetails: review.details });
+  return ctx.state;
+}
+
+test('flat server review rows use their source result unit and reach the actual answer state', async () => {
+  const h = harness({ initial: initialComposition(), compose: true, fetch: async (url, init) => {
+    const pathname = new URL(url).pathname;
+    let match;
+    if ((match = pathname.match(/\/units\/unit-(\d+)\/exam$/))) return ok({ parts: [unitPart(Number(match[1]))] });
+    if (pathname.endsWith('/practice/v1/attempts')) return ok({ resultId: `result-${JSON.parse(init.body).unitId.split('-')[1]}` });
+    if ((match = pathname.match(/\/results\/result-(\d+)\/review$/))) {
+      const i = Number(match[1]);
+      return ok({ result: { unitId: `unit-${i}` }, details: [{ qNumber: String(i), rightAnswer: `answer-${i}` }] });
+    }
+    throw new Error(pathname);
+  } });
+  await h.api.submitMixedPracticeAttempt(compositionId, { parts: slots.map((s, i) => ({
+    id: s.partId, groups: [{ id: `group-${i + 1}`, questions: [{ qNumber: String(i + 1), userAnswer: `answer-${i + 1}` }] }],
+  })) });
+  const review = await h.api.getMixedPracticeReview(compositionId);
+  assert.equal(review.score, 4);
+  const state = reviewState(review);
+  assert.equal(state.byPart['part-1'].answerResults['1'].rightAnswer, 'answer-1');
+  expectSession(h);
+});
+
+test('reopening a saved blank review retrieves answers without resubmitting the paper', async () => {
+  const initial = initialComposition();
+  const store = JSON.parse(initial['xxgg.servercompose.v1']);
+  store.compositions[compositionId].attempt = {
+    resultId: 'result-1', unitResultIds: ['result-1', 'result-2', 'result-3', 'result-4'],
+    elapsedSeconds: 120,
+    details: slots.map((s, i) => ({ partId: s.partId, groupId: `group-${i + 1}`, questionId: `question-${i + 1}`,
+      qNumber: String(i + 1), userAnswer: `answer-${i + 1}`, rightAnswer: '', state: false })),
+  };
+  initial['xxgg.servercompose.v1'] = JSON.stringify(store);
+  let reviewReads = 0;
+  const h = harness({ initial, compose: true, fetch: async (url, init) => {
+    assert.notEqual(init.method, 'POST');
+    const pathname = new URL(url).pathname;
+    let match;
+    if ((match = pathname.match(/\/units\/unit-(\d+)\/exam$/))) return ok({ parts: [unitPart(Number(match[1]))] });
+    if ((match = pathname.match(/\/results\/result-(\d+)\/review$/))) {
+      reviewReads++;
+      return ok({ result: { unitId: `unit-${match[1]}` }, parts: [unitPart(Number(match[1]), true)] });
+    }
+    throw new Error(pathname);
+  } });
+  const review = await h.api.getMixedPracticeReview(compositionId);
+  assert.equal(reviewReads, 4);
+  assert.equal(review.score, 4);
+  const state = reviewState(review);
+  assert.equal(state.byPart['part-1'].answers['1'], 'answer-1');
+  assert.equal(state.byPart['part-1'].answerResults['1'].rightAnswer, 'answer-1');
+  assert.equal(state.byPart['part-1'].answerResults['1'].isCorrect, true);
+  assert.equal(JSON.parse(h.localStorage.getItem('xxgg.servercompose.v1')).compositions[compositionId].attempt.details[0].rightAnswer, 'answer-1');
+  expectSession(h);
+});
+
+test('exam placeholders cannot erase saved answer rows or their correctness', () => {
+  const part = unitPart(1);
+  part.groups[0].questions[0].rightAnswer = '';
+  part.groups[0].questions[0].state = false;
+  part.groups[0].questions[0].userAnswer = '';
+  const state = reviewState({ parts: [part], details: [{ partId: 'part-1', qNumber: '1', userAnswer: 'answer-1', rightAnswer: 'answer-1', state: true }] });
+  assert.equal(state.byPart['part-1'].answerResults['1'].rightAnswer, 'answer-1');
+  assert.equal(state.byPart['part-1'].answerResults['1'].isCorrect, true);
+  assert.equal(state.byPart['part-1'].answers['1'], 'answer-1');
+});
+
+test('a failed analysis request leaves the saved answer and embedded explanation visible', async () => {
+  const h = harness({ initial: session, fetch: async () => json({ code: '401', msg: 'ANALYSIS_UNAVAILABLE' }, 401) });
+  const part = unitPart(1);
+  part.groups[0].questions[0].analyses = [{ content: 'Existing explanation', labelsOne: '解析' }];
+  const ref = value => ({ value });
+  Object.assign(h.ctx, {
+    d: ref('part-1'), Ou: (p, q) => `${p}::${q}`, $: { begin: () => ({}), isCurrent: () => true },
+    L: ref('mixed:saved'), Te: ref({}), I: ref({ 1: { questionId: 'question-1', partId: 'part-1', groupId: 'group-1' } }),
+    ze: { parts: [part] }, H: ref({ 1: { rightAnswer: 'answer-1', isCorrect: true } }),
+    ie: ref(null), he: ref(false), Ve: h.api, Ne: () => {}, k: ref(null), D: () => {}, ct: v => v,
+  });
+  vm.runInContext(section(reviewSource, 'function xxggReviewExplanation', 'const Fo=')
+    + section(reviewSource, 'async function vn(t)', 'function kr(t)') + '\nglobalThis.select=vn;', h.ctx);
+  await h.ctx.select(1);
+  assert.equal(h.ctx.ie.value.analysisList[0].content, 'Existing explanation');
+  assert.equal(h.ctx.H.value[1].rightAnswer, 'answer-1');
+  assert.equal(h.ctx.he.value, false);
+  expectSession(h);
+});
+
+test('unavailable server answers remain ungraded and can be retried without another submit', async () => {
+  let available = false;
+  let posts = 0;
+  const h = harness({ initial: initialComposition(), compose: true, fetch: async (url, init) => {
+    const pathname = new URL(url).pathname;
+    let match;
+    if ((match = pathname.match(/\/units\/unit-(\d+)\/exam$/))) return ok({ parts: [unitPart(Number(match[1]))] });
+    if (pathname.endsWith('/practice/v1/attempts')) {
+      posts++;
+      return ok({ resultId: `result-${JSON.parse(init.body).unitId.split('-')[1]}` });
+    }
+    if ((match = pathname.match(/\/results\/result-(\d+)\/review$/))) {
+      if (!available) return json({ code: '401', msg: 'REVIEW_UNAVAILABLE' }, 401);
+      return ok({ result: { unitId: `unit-${match[1]}`, parts: [unitPart(Number(match[1]), true)] } });
+    }
+    throw new Error(pathname);
+  } });
+  await h.api.submitMixedPracticeAttempt(compositionId, { parts: slots.map((s, i) => ({
+    id: s.partId, groups: [{ id: `group-${i + 1}`, questions: [{ qNumber: String(i + 1), userAnswer: `answer-${i + 1}` }] }],
+  })) });
+  const pending = await h.api.getMixedPracticeReview(compositionId);
+  assert.equal(pending.answerStatus, 'pending');
+  assert.equal(pending.missingAnswers, 4);
+  assert.equal(pending.details[0].state, null);
+  assert.equal(pending.details[0].graded, false);
+  assert.equal(pending.details[0].userAnswer, 'answer-1');
+  available = true;
+  const recovered = await h.api.getMixedPracticeReview(compositionId);
+  assert.equal(recovered.answerStatus, 'ready');
+  assert.equal(recovered.score, 4);
+  assert.equal(posts, 4);
+  assert.equal(reviewState(recovered).byPart['part-1'].answerResults['1'].isCorrect, true);
+  expectSession(h);
+});
+
+test('a missing composition reports an error instead of an empty successful answer page', async () => {
+  const h = harness({ initial: session, compose: true });
+  await assert.rejects(() => h.api.getMixedPracticeReview('missing-composition'), error => {
+    assert.equal(error.status, 404);
+    return true;
+  });
+  expectSession(h);
+});
 
 test('four-part listening submit reaches the mixed review with server answers and survives reload', async () => {
   const calls = [];
