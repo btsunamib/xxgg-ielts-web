@@ -185,6 +185,89 @@ function reviewState(review) {
   return ctx.state;
 }
 
+function savedReviewInitial(withAnswers = true) {
+  const initial = initialComposition();
+  const store = JSON.parse(initial['xxgg.servercompose.v1']);
+  const comp = store.compositions[compositionId];
+  comp.partUnits = Object.fromEntries(slots.map((s, i) => [s.partId, `unit-${i + 1}`]));
+  comp.attempt = {
+    unitResults: slots.map((s, i) => ({ unitId: `unit-${i + 1}`, resultId: `result-${i + 1}` })),
+    elapsedSeconds: 120,
+    details: slots.map((s, i) => ({ partId: s.partId, groupId: `group-${i + 1}`, questionId: `question-${i + 1}`,
+      qNumber: String(i + 1), userAnswer: `answer-${i + 1}`, rightAnswer: withAnswers ? `answer-${i + 1}` : '',
+      state: withAnswers ? true : null, isCorrect: withAnswers ? true : null })),
+  };
+  initial['xxgg.servercompose.v1'] = JSON.stringify(store);
+  return initial;
+}
+
+test('saved answers stay visible when source exams are unavailable, and retry restores the full paper', async () => {
+  let available = false;
+  const h = harness({ initial: savedReviewInitial(), compose: true, fetch: async (url, init) => {
+    assert.notEqual(init.method, 'POST');
+    const match = new URL(url).pathname.match(/\/units\/unit-(\d+)\/exam$/);
+    assert.ok(match);
+    return available ? ok({ parts: [unitPart(Number(match[1]))] }) : json({ code: '503' }, 503);
+  } });
+  const cached = await h.api.getMixedPracticeReview(compositionId);
+  assert.equal(cached.paperStatus, 'cached');
+  assert.equal(cached.parts.length, 4);
+  assert.equal(cached.score, 4);
+  assert.equal(cached.elapsedSeconds, 120);
+  assert.equal(reviewState(cached).byPart['part-1'].answers['1'], 'answer-1');
+  assert.equal(reviewState(cached).byPart['part-1'].answerResults['1'].rightAnswer, 'answer-1');
+  const service = fs.readFileSync(path.join(root, 'assets/examDataService-BtCJRleA.js'), 'utf8');
+  const runtime = vm.createContext({ tt: 'https://api.test/api', oo: value => value, console: { log() {} } });
+  vm.runInContext(section(service, 'class to{', 'const go=new to') + '\nglobalThis.exam=new to;', runtime);
+  runtime.exam.setRuntimeData(cached, compositionId);
+  assert.equal(runtime.exam.getPartsInfo().length, 4);
+  assert.equal(runtime.exam.getQuestionMappingByPart()['part-1']['1'].questionId, 'question-1');
+  available = true;
+  const full = await h.api.getMixedPracticeReview(compositionId);
+  assert.equal(full.paperStatus, 'ready');
+  assert.equal(full.parts[0].reviewFallback, undefined);
+  expectSession(h);
+});
+
+test('existing result answers can recover even when the original source paper is unavailable', async () => {
+  const h = harness({ initial: savedReviewInitial(false), compose: true, fetch: async (url, init) => {
+    assert.notEqual(init.method, 'POST');
+    const pathname = new URL(url).pathname;
+    if (pathname.includes('/units/')) return json({ code: '503' }, 503);
+    const match = pathname.match(/\/results\/result-(\d+)\/review$/);
+    assert.ok(match);
+    return ok({ parts: [unitPart(Number(match[1]), true)] });
+  } });
+  const review = await h.api.getMixedPracticeReview(compositionId);
+  assert.equal(review.answerStatus, 'ready');
+  assert.equal(review.score, 4);
+  assert.equal(reviewState(review).byPart['part-4'].answerResults['4'].rightAnswer, 'answer-4');
+  expectSession(h);
+});
+
+test('failed source and result reads retain saved answers as ungraded instead of rejecting the whole review', async () => {
+  const h = harness({ initial: savedReviewInitial(false), compose: true, fetch: async (url, init) => {
+    assert.notEqual(init.method, 'POST');
+    return json({ code: '401', msg: 'UNAVAILABLE' }, 401);
+  } });
+  const review = await h.api.getMixedPracticeReview(compositionId);
+  assert.equal(review.answerStatus, 'pending');
+  assert.equal(review.missingAnswers, 4);
+  assert.equal(review.details[0].userAnswer, 'answer-1');
+  assert.equal(review.details[0].state, null);
+  expectSession(h);
+});
+
+test('a fallback for an old saved review preserves its existing multiple-choice mark', async () => {
+  const initial = savedReviewInitial();
+  const store = JSON.parse(initial['xxgg.servercompose.v1']);
+  Object.assign(store.compositions[compositionId].attempt.details[0], { userAnswer: 'CA', rightAnswer: 'A,C', state: true, isCorrect: true });
+  initial['xxgg.servercompose.v1'] = JSON.stringify(store);
+  const h = harness({ initial, compose: true, fetch: async () => json({ code: '503' }, 503) });
+  const review = await h.api.getMixedPracticeReview(compositionId);
+  assert.equal(reviewState(review).byPart['part-1'].answerResults['1'].isCorrect, true);
+});
+
 test('flat server review rows use their source result unit and reach the actual answer state', async () => {
   const h = harness({ initial: initialComposition(), compose: true, fetch: async (url, init) => {
     const pathname = new URL(url).pathname;
@@ -588,6 +671,20 @@ test('local mode refuses unavailable papers without saving an empty successful a
   await assert.rejects(() => h.api.getMixedPracticeExam('missing'), error => error.status === 404);
   await assert.rejects(() => h.api.getMixedPracticeReview('missing'), error => error.status === 404);
   assert.equal(Object.keys(h.window.__xxggLocalMode.store.attempts).length, 0);
+});
+
+test('local saved review stays readable when rebuilding its source paper fails', async () => {
+  const parts = slots.map((s, i) => ({ ...unitPart(i + 1, true), originalUnitId: s.unitId }));
+  parts[0].groups[0].questions[0].userAnswer = 'answer-1';
+  const initial = { 'xxgg.local.v1': JSON.stringify({
+    compositions: { [compositionId]: { slots, channel: 'listening' } },
+    attempts: { saved: { compositionId, resultId: 'saved', parts, total: 4, score: 4, elapsedSeconds: 120 } },
+  }) };
+  const h = harness({ initial, local: true, fetch: async () => json({ code: '503' }, 503) });
+  const review = await h.api.getMixedPracticeReview(compositionId);
+  assert.equal(review.parts.length, 4);
+  assert.equal(review.parts[0].groups[0].questions[0].userAnswer, 'answer-1');
+  assert.equal(review.score, 4);
 });
 
 test('an incomplete submitted paper never sends or claims a successful attempt', async () => {
