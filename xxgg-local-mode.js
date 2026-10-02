@@ -1119,7 +1119,7 @@ function codeByPartFor(unitId) {
         store.attempts[resultId] = attempt;
         rememberUnit(unitId, channel, examParts, b.parts, resultId, submittedAt);
         capAttempts();
-        saveStore();
+        if (!saveStore()) return fail('PRACTICE_STORAGE_FULL', 507);
 
         return ok({ resultId: resultId, unitId: unitId, status: 'submitted' });
       });
