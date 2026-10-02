@@ -1974,6 +1974,23 @@ function codeByPartFor(unitId) {
     return channel === 'listening' ? 4 : 3;
   }
 
+  function explicitPick(pool, body, need) {
+    var ids = asArray(body.selectedUnitIds);
+    if (ids.length !== need) return null;
+    var chosen = [], used = {}, parts = {};
+    for (var i = 0; i < ids.length; i++) {
+      var id = str(ids[i]);
+      var unit = null;
+      for (var j = 0; j < pool.length; j++) if (pool[j].unitId === id) { unit = pool[j]; break; }
+      if (!unit || used[id] || unit.partRank < 1 || unit.partRank > need || parts[unit.partRank]) return null;
+      used[id] = 1;
+      parts[unit.partRank] = 1;
+      chosen.push(unit);
+    }
+    chosen.sort(function (x, y) { return x.partRank - y.partRank; });
+    return chosen;
+  }
+
   function handleCompose(ctx) {
     return ctx.body().then(function (body) {
       var b = isPlainObject(body) ? body : {};
@@ -2086,6 +2103,11 @@ function codeByPartFor(unitId) {
         chosen.sort(function (x, y) { return (x.partRank || 99) - (y.partRank || 99); });
         chosen = chosen.slice(0, need);
 
+
+        if (b.selectionMode === 'custom' || b.selectedUnitIds !== undefined) {
+          chosen = explicitPick(pool, b, need);
+          if (!chosen) return fail('MIXED_PRACTICE_SELECTION_INVALID', 400);
+        }
 
         return Promise.all(chosen.map(function (c) { return ensureExam(c.unitId); })).then(function (exams) {
                     var slots = [];
