@@ -694,13 +694,16 @@
           var qid = questionIdOf(q);
           var ua = lookupSubmitted(index, pid, qn, q);
           var right = answerLookup(uid, qn, qid);
-          var isCorrect = answersMatch(ua, right, g);
+          if (!str(right)) right = q.rightAnswer || q.correctAnswer || '';
+          var graded = !!str(right);
+          var isCorrect = graded ? answersMatch(ua, right, g) : null;
 
           q.userAnswer = str(ua);
           q.rightAnswer = str(right);
           q.isCorrect = isCorrect;
           q.correct = isCorrect;
           q.state = isCorrect;
+          q.graded = graded;
           q.bookmarked = q.bookmarked === true;
 
           total++;
@@ -716,6 +719,7 @@
             state: isCorrect,
             isCorrect: isCorrect,
             correct: isCorrect,
+            graded: graded,
             rightAnswer: str(right),
             correctAnswer: str(right),
             questionId: qid,
@@ -1384,7 +1388,11 @@
     var gi;
     var qi;
 
-    var parts = asArray(data.parts);
+    // The normal review runtime also accepts result.parts. Flat detail rows
+    // sometimes identify their unit only through result.unitId.
+    unitId = str(unitId || (data.result && data.result.unitId) || data.unitId || '');
+    var source = extractExamPayload(data) || data;
+    var parts = asArray(source.parts);
     for (i = 0; i < parts.length; i++) {
       var p = parts[i] || {};
       var pid = partIdOf(p);
@@ -1409,7 +1417,7 @@
       }
     }
 
-    var details = asArray(data.details);
+    var details = asArray(data.details || source.details || (data.result && data.result.details));
     for (i = 0; i < details.length; i++) {
       var d = details[i] || {};
       var ra2 = d.rightAnswer;
@@ -1426,6 +1434,73 @@
     }
 
     return n;
+  }
+
+  function submittedFromDetails(details) {
+    var parts = {};
+    var list = asArray(details);
+    for (var i = 0; i < list.length; i++) {
+      var d = list[i] || {};
+      var pid = str(d.partId);
+      var gid = str(d.groupId);
+      if (!parts[pid]) parts[pid] = { id: pid, groups: [] };
+      parts[pid].groups.push({ id: gid, questions: [{
+        id: str(d.questionId || d.id), qNumber: qNumberOf(d),
+        userAnswer: d.userAnswer !== undefined && d.userAnswer !== null ? d.userAnswer : d.answer
+      }] });
+    }
+    return Object.keys(parts).map(function (pid) { return parts[pid]; });
+  }
+
+  function missingAnswers(graded) {
+    return asArray(graded.details).filter(function (d) { return !str(d.rightAnswer).trim(); }).length;
+  }
+
+  var reviewRecovery = {};
+  function recoverAttemptAnswers(comp, examParts) {
+    var attempt = comp.attempt;
+    if (!isPlainObject(attempt)) return Promise.resolve(null);
+    // Saved details are authoritative. Raw /exam questions carry null/empty
+    // answer placeholders and must not replace a previously marked answer.
+    harvestFromReview({ details: attempt.details }, '', comp.partUnits, comp.groupUnits);
+    var submitted = asArray(attempt.parts).length ? attempt.parts : submittedFromDetails(attempt.details);
+    var graded = gradeComposition(examParts, submitted);
+    function saveGraded() {
+      attempt.parts = graded.parts;
+      attempt.details = graded.details;
+      attempt.total = graded.total;
+      attempt.correct = graded.correct;
+      attempt.accuracy = graded.accuracy;
+      attempt.missingAnswers = missingAnswers(graded);
+      saveAnswers();
+      saveComposeStore();
+      return attempt;
+    }
+    if (!missingAnswers(graded)) return Promise.resolve(saveGraded());
+    var id = str(comp.id);
+    if (reviewRecovery[id]) return reviewRecovery[id];
+    var results = asArray(attempt.unitResults);
+    if (!results.length) {
+      results = asArray(attempt.unitResultIds).map(function (rid) { return { resultId: rid }; });
+      if (!results.length && attempt.resultId) results = [{ resultId: attempt.resultId }];
+    }
+    // Only read existing server results: opening or retrying a review never
+    // creates another attempt or discards the student's submitted answers.
+    var pending = Promise.all(results.map(function (result) {
+      var rid = str(result.resultId);
+      if (!rid) return Promise.resolve();
+      return requestUpstream(apiBase() + '/practice/v1/results/' + encodeURIComponent(rid) + '/review',
+        { method: 'GET' }, UPSTREAM_TIMEOUT_MS).then(function (res) {
+          if (res && res.ok) harvestFromReview(res.data, str(result.unitId), comp.partUnits, comp.groupUnits);
+        });
+    })).then(function () {
+      graded = gradeComposition(examParts, submitted);
+      return saveGraded();
+    });
+    reviewRecovery[id] = pending;
+    return pending.then(function (value) { delete reviewRecovery[id]; return value; }, function (error) {
+      delete reviewRecovery[id]; throw error;
+    });
   }
 
   function submitUnitSubset(unitId, channel, subset, comp) {
@@ -1576,15 +1651,17 @@
           //    same 15s budget.
           var harvested = 0;
           var harvestJobs = [];
-          for (var h = 0; h < unitResultIds.length; h++) {
-            harvestJobs.push((function (rid) {
+          var unitResults = jobs.filter(function (job) { return job.ok && job.resultId; });
+          for (var h = 0; h < unitResults.length; h++) {
+            harvestJobs.push((function (job) {
+              var rid = job.resultId;
               var url = apiBase() + '/practice/v1/results/' + encodeURIComponent(rid) + '/review';
               return requestUpstream(url, { method: 'GET' }, UPSTREAM_TIMEOUT_MS)
                 .then(function (res) {
                   if (!res || !res.ok) return;
-                  harvested += harvestFromReview(res.data, '', comp.partUnits, comp.groupUnits);
+                  harvested += harvestFromReview(res.data, job.unitId, comp.partUnits, comp.groupUnits);
                 }, function () { /* ignore */ });
-            })(unitResultIds[h]));
+            })(unitResults[h]));
           }
 
           return Promise.all(harvestJobs).then(function () {
@@ -1607,6 +1684,7 @@
               channel: channel,
               resultId: unitResultIds[0],
               unitResultIds: unitResultIds,
+              unitResults: unitResults.map(function (job) { return { unitId: job.unitId, resultId: job.resultId }; }),
               failures: failures,
               parts: graded.parts,
               details: graded.details,
@@ -1614,6 +1692,7 @@
               correct: graded.correct,
               accuracy: graded.accuracy
             };
+            comp.attempt.missingAnswers = missingAnswers(graded);
             comp.lastAttemptId = unitResultIds[0];
             saveComposeStore();
 
@@ -1671,21 +1750,13 @@
     var comp = getComposition(id);
 
     if (!comp) {
-      return Promise.resolve(ok({
-        compositionId: id,
-        id: id,
-        sessionType: 'mixed',
-        title: CN_MIXED_TITLE,
-        elapsedSeconds: 0,
-        children: [],
-        parts: [],
-        details: []
-      }));
+      return Promise.resolve(fail('MIXED_PRACTICE_COMPOSITION_NOT_FOUND', 404));
     }
 
     return ensureCompositionExam(id).then(function (exam) {
       var examParts = exam && isArray(exam.parts) ? exam.parts : [];
-      var attempt = isPlainObject(comp.attempt) ? comp.attempt : null;
+      if (!examParts.length) return fail('MIXED_PRACTICE_REVIEW_NOT_READY', 503);
+      return recoverAttemptAnswers(comp, examParts).then(function (attempt) {
       var parts = attempt && isArray(attempt.parts) && attempt.parts.length
         ? attempt.parts : examParts;
       var details = attempt && isArray(attempt.details) && attempt.details.length
@@ -1725,9 +1796,13 @@
         total: attempt ? num(attempt.total, 0) : 0,
         score: attempt ? num(attempt.correct, 0) : 0,
         accuracy: attempt ? num(attempt.accuracy, 0) : 0,
+        channel: str(comp.channel),
+        answerStatus: attempt && attempt.missingAnswers ? 'pending' : 'ready',
+        missingAnswers: attempt ? num(attempt.missingAnswers, 0) : 0,
         children: children,
         parts: parts,
         details: details
+      });
       });
     });
   }
