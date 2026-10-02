@@ -32,11 +32,15 @@ function json(body, status = 200) {
   return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
 }
 function ok(data) { return json({ code: '200', data, msg: 'OK' }); }
-function harness({ initial = {}, fetch = async () => ok({}), local = false, compose = false } = {}) {
-  const localStorage = storage(initial);
+function harness({ initial = {}, fetch = async () => ok({}), local = false, compose = false,
+  sharedStorage, sharedSessionStorage, rejectStorage = false, rejectSessionStorage = false } = {}) {
+  const localStorage = sharedStorage || storage(initial);
+  const sessionStorage = sharedSessionStorage || storage();
+  if (rejectStorage) localStorage.setItem = () => { throw new Error('QuotaExceededError'); };
+  if (rejectSessionStorage) sessionStorage.setItem = () => { throw new Error('QuotaExceededError'); };
   const events = [];
   const window = {
-    document: {}, localStorage, fetch, Response, Request, Headers, AbortController,
+    document: {}, localStorage, sessionStorage, fetch, Response, Request, Headers, AbortController,
     location: { href: 'https://example.test/xxgg-ielts-web/' },
     __APP_CONFIG__: { practiceApiBaseUrl: 'https://api.test/api' },
     __XXGG_WEB_CONFIG__: {}, dispatchEvent: event => events.push(event.type),
@@ -63,7 +67,7 @@ function harness({ initial = {}, fetch = async () => ok({}), local = false, comp
     'globalThis.api=new Sw;globalThis.profile=new Z0;globalThis.auth=Gt;globalThis.submit=ZF;',
   ];
   vm.runInContext(snippets.join('\n'), ctx);
-  return { ctx, window, localStorage, events, api: ctx.api, profile: ctx.profile, auth: ctx.auth, submit: ctx.submit };
+  return { ctx, window, localStorage, sessionStorage, events, api: ctx.api, profile: ctx.profile, auth: ctx.auth, submit: ctx.submit };
 }
 const session = { token: 'account-token', user: JSON.stringify({ id: 'student-1' }) };
 function expectSession(h) {
@@ -733,4 +737,115 @@ test('a catalogue refresh actually bypasses the successful cached list', async (
   assert.equal((await h.window.__xxggServerCompose.listUnits('listening'))[0].titleEn, 'Original');
   title = 'Updated';
   assert.equal((await h.window.__xxggServerCompose.listUnits('listening', true))[0].titleEn, 'Updated');
+});
+
+function successfulCompositionUpstream(posts = []) {
+  return async (url, init) => {
+    const p = new URL(url).pathname;
+    let m;
+    if ((m = p.match(/\/units\/unit-(\d+)\/exam$/))) return ok({ parts: [unitPart(Number(m[1]))] });
+    if (p.endsWith('/practice/v1/attempts')) {
+      const uid = JSON.parse(init.body).unitId;
+      posts.push(uid);
+      return ok({ resultId: `result-${uid.split('-')[1]}` });
+    }
+    if ((m = p.match(/\/results\/result-(\d+)\/review$/))) return ok({ parts: [unitPart(Number(m[1]), true)] });
+    if (p.endsWith('/albums')) return ok([{ id: 'album-1' }]);
+    if (p.endsWith('/units')) return ok(slots.map((s, i) => ({ id: s.unitId, channel: 'listening', partNo: `Part ${i + 1}` })));
+    if (p.endsWith('/unit-status')) return ok([]);
+    throw new Error(p);
+  };
+}
+
+test('quota errors never evict the paper currently being answered (local-mix-33)', async () => {
+  const initial = initialComposition();
+  initial['xxgg.servercompose.v1'] = initial['xxgg.servercompose.v1'].replaceAll(compositionId, 'local-mix-33');
+  const posts = [];
+  const h = harness({ initial, compose: true, rejectStorage: true, fetch: successfulCompositionUpstream(posts) });
+  assert.equal((await h.api.getMixedPracticeExam('local-mix-33')).parts.length, 4);
+  const response = await h.api.submitMixedPracticeAttempt('local-mix-33', submittedPaper());
+  assert.equal(response.status, 'submitted');
+  assert.equal(posts.length, 4);
+  assert.equal((await h.api.getMixedPracticeReview('local-mix-33')).score, 4);
+  expectSession(h);
+});
+
+test('submit reads a composition saved by another page after this page started', async () => {
+  const h = harness({ initial: session, compose: true, fetch: successfulCompositionUpstream() });
+  h.localStorage.setItem('xxgg.servercompose.v1', initialComposition()['xxgg.servercompose.v1']);
+  assert.equal((await h.api.submitMixedPracticeAttempt(compositionId, submittedPaper())).status, 'submitted');
+});
+
+test('logging in can submit the same paper created in local mode', async () => {
+  const h = harness({ local: true, compose: true, fetch: successfulCompositionUpstream() });
+  const comp = await h.api.composeMixedPractice({ channel: 'listening', onlyUndone: false });
+  await h.api.getMixedPracticeExam(comp.compositionId);
+  h.localStorage.setItem('token', session.token);
+  h.localStorage.setItem('user', session.user);
+  assert.equal((await h.api.submitMixedPracticeAttempt(comp.compositionId, submittedPaper())).status, 'submitted');
+  assert.equal((await h.api.getMixedPracticeReview(comp.compositionId)).score, 4);
+  expectSession(h);
+});
+
+test('the session copy restores a submitted review if primary storage cannot be written', async () => {
+  const h = harness({ initial: initialComposition(), compose: true, rejectStorage: true, fetch: successfulCompositionUpstream() });
+  await h.api.submitMixedPracticeAttempt(compositionId, submittedPaper());
+  const reloaded = harness({ initial: session, compose: true, sharedSessionStorage: h.sessionStorage,
+    fetch: async () => json({ code: '503' }, 503) });
+  const review = await reloaded.api.getMixedPracticeReview(compositionId);
+  assert.equal(review.parts.length, 4);
+  assert.equal(review.score, 4);
+  assert.equal(review.details[0].userAnswer, 'answer-1');
+});
+
+test('compose refuses success if neither browser store can retain the paper', async () => {
+  for (const local of [false, true]) {
+    const h = harness({ initial: local ? { token: 'local-device' } : session, local, compose: !local,
+      rejectStorage: true, rejectSessionStorage: true, fetch: successfulCompositionUpstream() });
+    await assert.rejects(() => h.api.composeMixedPractice({ channel: 'listening', onlyUndone: false }), error => error.status === 507);
+  }
+});
+
+test('two open pages create different IDs and retain both papers on reload', async () => {
+  const sharedStorage = storage(session);
+  const a = harness({ sharedStorage, compose: true, fetch: successfulCompositionUpstream() });
+  const b = harness({ sharedStorage, compose: true, fetch: successfulCompositionUpstream() });
+  const ca = await a.api.composeMixedPractice({ channel: 'listening', onlyUndone: false });
+  const cb = await b.api.composeMixedPractice({ channel: 'listening', onlyUndone: false });
+  assert.notEqual(ca.compositionId, cb.compositionId);
+  const reloaded = harness({ sharedStorage, compose: true, fetch: successfulCompositionUpstream() });
+  assert.equal((await reloaded.api.getMixedPracticeExam(ca.compositionId)).parts.length, 4);
+  assert.equal((await reloaded.api.getMixedPracticeExam(cb.compositionId)).parts.length, 4);
+});
+
+test('cache limits protect unfinished papers, including drafts older than forty newer records', async () => {
+  const initial = initialComposition();
+  const saved = JSON.parse(initial['xxgg.servercompose.v1']);
+  for (let i = 0; i < 41; i++) saved.compositions[`new-draft-${i}`] = { ...saved.compositions[compositionId], createdAt: '2026-10-02T07:00:00Z' };
+  initial['xxgg.servercompose.v1'] = JSON.stringify(saved);
+  const h = harness({ initial, compose: true, fetch: successfulCompositionUpstream() });
+  await h.api.getMixedPracticeExam('new-draft-0');
+  assert.equal((await h.api.submitMixedPracticeAttempt(compositionId, submittedPaper())).status, 'submitted');
+});
+
+test('a newer session result wins over an older primary composition after quota failure', async () => {
+  const initial = initialComposition();
+  const h = harness({ initial, compose: true, rejectStorage: true, fetch: successfulCompositionUpstream() });
+  await h.api.submitMixedPracticeAttempt(compositionId, submittedPaper());
+  const reloaded = harness({ initial, compose: true, sharedSessionStorage: h.sessionStorage,
+    fetch: async () => json({ code: '503' }, 503) });
+  assert.equal((await reloaded.api.getMixedPracticeReview(compositionId)).score, 4);
+});
+
+test('local quota failure preserves saved answers through a reload in the same tab', async () => {
+  const h = harness({ initial: { token: 'local-device' }, local: true, fetch: successfulCompositionUpstream() });
+  const c = await h.api.composeMixedPractice({ channel: 'listening', onlyUndone: false });
+  await h.api.getMixedPracticeExam(c.compositionId);
+  h.localStorage.setItem = () => { throw new Error('QuotaExceededError'); };
+  await h.api.submitMixedPracticeAttempt(c.compositionId, submittedPaper());
+  const reloaded = harness({ initial: { token: 'local-device' }, local: true,
+    sharedSessionStorage: h.sessionStorage, fetch: async () => json({ code: '503' }, 503) });
+  const review = await reloaded.api.getMixedPracticeReview(c.compositionId);
+  assert.equal(review.parts.length, 4);
+  assert.equal(review.details[0].userAnswer, 'answer-1');
 });

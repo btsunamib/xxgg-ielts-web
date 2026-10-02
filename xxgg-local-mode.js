@@ -109,6 +109,9 @@
   function lsGet(k) { return safe(function () { return W.localStorage.getItem(k); }, null); }
   function lsSet(k, v) { return safe(function () { W.localStorage.setItem(k, v); return true; }, false); }
   function lsDel(k) { return safe(function () { W.localStorage.removeItem(k); return true; }, false); }
+  function ssGet(k) { return safe(function () { return W.sessionStorage.getItem(k); }, null); }
+  function ssSet(k, v) { return safe(function () { W.sessionStorage.setItem(k, v); return true; }, false); }
+  var COMPOSE_BACKUP_KEY = 'xxgg.local.compose.v1';
 
   function isLocalTokenValue(v) {
     return typeof v === 'string' && v.length > 0 && v.indexOf(LOCAL_PREFIX) === 0;
@@ -241,21 +244,41 @@
     var parsed = null;
     if (raw) parsed = safe(function () { return JSON.parse(raw); }, null);
     replaceStoreContents(normalizeStore(parsed));
+    mergeCompositionRecords();
   }
 
-  function dropOldestAttempt() {
-    var ids = Object.keys(store.attempts);
-    if (!ids.length) return false;
-    var oldest = null;
-    var oldestTs = Infinity;
-    for (var i = 0; i < ids.length; i++) {
-      var a = store.attempts[ids[i]];
-      var t = tsOf(a && a.submittedAt);
-      if (t < oldestTs) { oldestTs = t; oldest = ids[i]; }
+  function mergeCompositionRecords() {
+    var sources = [lsGet(STORE_KEY), ssGet(COMPOSE_BACKUP_KEY)];
+    for (var si = 0; si < sources.length; si++) {
+      var saved = safe(function () { return JSON.parse(sources[si] || 'null'); }, null);
+      if (!isPlainObject(saved)) continue;
+      store.seq = Math.max(store.seq, num(saved.seq, 0));
+      var comps = isPlainObject(saved.compositions) ? saved.compositions : {};
+      var ids = Object.keys(comps);
+      for (var i = 0; i < ids.length; i++) if (!isPlainObject(store.compositions[ids[i]])) store.compositions[ids[i]] = comps[ids[i]];
+      var attempts = isPlainObject(saved.attempts) ? saved.attempts : {};
+      var resultIds = Object.keys(attempts);
+      for (var ri = 0; ri < resultIds.length; ri++) if (!isPlainObject(store.attempts[resultIds[ri]])) store.attempts[resultIds[ri]] = attempts[resultIds[ri]];
     }
-    if (oldest === null) return false;
-    delete store.attempts[oldest];
-    return true;
+  }
+
+  function getComposition(id) {
+    mergeCompositionRecords();
+    return isPlainObject(store.compositions[id]) ? store.compositions[id] : null;
+  }
+
+  function saveCompositionRecords() {
+    mergeCompositionRecords();
+    capAttempts();
+    var backup = { seq: store.seq, compositions: {}, attempts: store.attempts };
+    var ids = Object.keys(store.compositions);
+    for (var i = 0; i < ids.length; i++) {
+      var c = store.compositions[ids[i]];
+      if (!isPlainObject(c)) continue;
+      backup.compositions[ids[i]] = { id: ids[i], compositionId: ids[i], createdAt: c.createdAt,
+        channel: c.channel, slots: c.slots, lastAttemptId: c.lastAttemptId };
+    }
+    return ssSet(COMPOSE_BACKUP_KEY, JSON.stringify(backup));
   }
 
   function capAttempts() {
@@ -277,14 +300,15 @@
   }
 
   function saveStore() {
-    // Retry with progressively fewer attempts when the quota is exhausted.
-    for (var attempt = 0; attempt < 8; attempt++) {
-      var text = safe(function () { return JSON.stringify(store); }, null);
-      if (text === null) return false;
-      if (lsSet(STORE_KEY, text)) return true;
-      if (!dropOldestAttempt()) return false;
-    }
-    return false;
+    var compositionSaved = saveCompositionRecords();
+    var snapshot = cloneJson(store);
+    if (!snapshot) return compositionSaved;
+    // Slot metadata rebuilds exams. Keep the saved graded attempt tree, but
+    // avoid persisting a second full copy of every question and passage.
+    var ids = Object.keys(snapshot.compositions);
+    for (var i = 0; i < ids.length; i++) delete snapshot.compositions[ids[i]].parts;
+    var text = safe(function () { return JSON.stringify(snapshot); }, null);
+    return (text !== null && lsSet(STORE_KEY, text)) || compositionSaved;
   }
 
   function nextSeq() {
@@ -2095,7 +2119,7 @@ function codeByPartFor(unitId) {
           }
 
 var seq = nextSeq();
-          var compositionId = 'local-mix-' + seq;
+          var compositionId = 'local-mix-device-' + seq + '-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10);
           store.compositions[compositionId] = {
             id: compositionId,
             compositionId: compositionId,
@@ -2108,7 +2132,7 @@ var seq = nextSeq();
             slots: slots,
             parts: []
           };
-          saveStore();
+          if (!saveStore()) return fail('MIXED_PRACTICE_STORAGE_FULL', 507);
 
           return ok({
             compositionId: compositionId,
@@ -2129,7 +2153,7 @@ var seq = nextSeq();
   }
 
   function resolveCompositionParts(id) {
-    var comp = isPlainObject(store.compositions[id]) ? store.compositions[id] : null;
+    var comp = getComposition(id);
     if (!comp) return Promise.resolve(null);
     if (compositionPartsComplete(comp, comp.parts)) return Promise.resolve(comp.parts);
     if (compositionExamCache[id] && compositionPartsComplete(comp, compositionExamCache[id].parts)) {
@@ -2171,7 +2195,7 @@ var seq = nextSeq();
 
   function handleMixedExam(ctx) {
     var id = decodeURIComponent(str(ctx.params[0]));
-    var comp = isPlainObject(store.compositions[id]) ? store.compositions[id] : null;
+    var comp = getComposition(id);
 
     function payload(parts) {
       var originalParents = [];
@@ -2239,7 +2263,7 @@ var seq = nextSeq();
         };
         if (comp) comp.lastAttemptId = resultId;
         capAttempts();
-        saveStore();
+        if (!saveStore()) return fail('MIXED_PRACTICE_STORAGE_FULL', 507);
 
         // The submit guard needs data.compositionId AND status==="submitted".
         return ok({ compositionId: id, status: 'submitted', resultId: resultId });
@@ -2249,7 +2273,7 @@ var seq = nextSeq();
 
   function handleMixedReview(ctx) {
     var id = decodeURIComponent(str(ctx.params[0]));
-    var comp = isPlainObject(store.compositions[id]) ? store.compositions[id] : null;
+    var comp = getComposition(id);
 
     if (!comp) return Promise.resolve(fail('MIXED_PRACTICE_COMPOSITION_NOT_FOUND', 404));
     return resolveCompositionParts(id).then(function (parts) {
@@ -2505,6 +2529,7 @@ var seq = nextSeq();
     replaceStoreContents(blankStore());
     clearCaches();
     lsDel(STORE_KEY);
+    safe(function () { W.sessionStorage.removeItem(COMPOSE_BACKUP_KEY); }, null);
     ensureLocalSession();
     saveStore();
     return true;
@@ -2521,6 +2546,8 @@ var seq = nextSeq();
     if (!isPlainObject(parsed)) return false;
     replaceStoreContents(normalizeStore(parsed));
     clearCaches();
+    lsDel(STORE_KEY);
+    safe(function () { W.sessionStorage.removeItem(COMPOSE_BACKUP_KEY); }, null);
     saveStore();
     return true;
   }
