@@ -28,7 +28,9 @@
     if (D.getElementById('xxgg-compose-editor-style')) return;
     var el = D.createElement('style');
     el.id = 'xxgg-compose-editor-style';
-    el.textContent = '.xxgg-compose-editor{font-size:13px;color:var(--color-text-primary,#232427)}' +
+    el.textContent = '.mix-modal .mix-result-list .mix-result-row{grid-template-columns:auto minmax(0,1fr) auto auto;column-gap:8px}' +
+      '.mix-modal .mix-result-row .mix-result-summary-edit{border:1px solid var(--border,#e0e0e0);border-radius:6px;padding:5px 8px;margin:0;color:var(--accent,#3a6ea8);white-space:nowrap}' +
+      '.xxgg-compose-editor{font-size:13px;color:var(--color-text-primary,#232427)}' +
       '.xxgg-compose-editor *{box-sizing:border-box}' +
       '.xxgg-ce-head,.xxgg-ce-row,.xxgg-ce-actions{display:flex;align-items:center;gap:10px}' +
       '.xxgg-ce-head{justify-content:space-between;margin:12px 0}.xxgg-ce-muted{color:var(--color-text-secondary,#71727a);font-size:12px}' +
@@ -159,5 +161,6 @@
     load(false);
     return function dispose() { disposed = true; sequence++; root.innerHTML = ''; };
   }
+  styles();
   W.__xxggComposePicker = { mount: mount };
 })();
