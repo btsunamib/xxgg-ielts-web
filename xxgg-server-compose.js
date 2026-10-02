@@ -674,6 +674,11 @@
           if (!str(right)) right = q.rightAnswer || q.correctAnswer || '';
           var graded = !!str(right);
           var isCorrect = graded ? answersMatch(ua, right, g) : null;
+          // Old compact records may lack the question type. Keep an existing
+          // mark while showing saved rows; the full paper will regrade on retry.
+          if (part.reviewFallback === true && graded &&
+              normalizeAnswer(right) === normalizeAnswer(q.rightAnswer) &&
+              typeof q.isCorrect === 'boolean') isCorrect = q.isCorrect;
 
           q.userAnswer = str(ua);
           q.rightAnswer = str(right);
@@ -691,6 +696,8 @@
             questionNumber: qn,
             partId: pid,
             groupId: str(g.id),
+            groupType: str(g.type),
+            originalUnitId: uid,
             userAnswer: str(ua),
             answer: str(ua),
             state: isCorrect,
@@ -1415,6 +1422,44 @@
     return Object.keys(parts).map(function (pid) { return parts[pid]; });
   }
 
+  function savedReviewParts(comp) {
+    var attempt = comp && comp.attempt;
+    if (!isPlainObject(attempt)) return [];
+    if (asArray(attempt.parts).length) return cloneJson(attempt.parts) || [];
+    var parts = {};
+    var groups = {};
+    var slots = asArray(comp.slots);
+    var rows = asArray(attempt.details);
+    for (var i = 0; i < rows.length; i++) {
+      var row = rows[i] || {};
+      var pid = str(row.partId);
+      var qn = qNumberOf(row);
+      if (!pid || !qn) continue;
+      var uid = str(row.originalUnitId || (comp.partUnits && comp.partUnits[pid]) || '');
+      if (!parts[pid]) {
+        var slot = slots.filter(function (s) { return str(s && (s.unitId || s.partId || s.id)) === uid; })[0] || {};
+        var label = str(slot.partNo || ('Part ' + (Object.keys(parts).length + 1)));
+        parts[pid] = { id: pid, partId: pid, originalUnitId: uid, unitId: uid,
+          slot: str(slot.slot), partNum: label, partNo: label, reviewFallback: true, groups: [] };
+        groups[pid] = {};
+      }
+      var gid = str(row.groupId || (pid + '-saved'));
+      if (!groups[pid][gid]) {
+        groups[pid][gid] = { id: gid, type: str(row.groupType || 'fill-in-blank'), questions: [] };
+        parts[pid].groups.push(groups[pid][gid]);
+      }
+      var mark = row.isCorrect !== undefined ? row.isCorrect : row.state;
+      groups[pid][gid].questions.push({
+        id: str(row.questionId || row.id), questionId: str(row.questionId || row.id), qNumber: qn,
+        userAnswer: str(row.userAnswer !== undefined ? row.userAnswer : row.answer),
+        rightAnswer: str(row.rightAnswer || row.correctAnswer || ''),
+        isCorrect: typeof mark === 'boolean' ? mark : null,
+        state: typeof mark === 'boolean' ? mark : null
+      });
+    }
+    return Object.keys(parts).map(function (pid) { return parts[pid]; });
+  }
+
   function missingAnswers(graded) {
     return asArray(graded.details).filter(function (d) { return !str(d.rightAnswer).trim(); }).length;
   }
@@ -1760,6 +1805,8 @@
 
     return ensureCompositionExam(id).then(function (exam) {
       var examParts = exam && isArray(exam.parts) ? exam.parts : [];
+      var paperStatus = examParts.length ? 'ready' : 'cached';
+      if (!examParts.length) examParts = savedReviewParts(comp);
       if (!examParts.length) return fail('MIXED_PRACTICE_REVIEW_NOT_READY', 503);
       return recoverAttemptAnswers(comp, examParts).then(function (attempt) {
       var parts = attempt && isArray(attempt.parts) && attempt.parts.length
@@ -1802,6 +1849,7 @@
         score: attempt ? num(attempt.correct, 0) : 0,
         accuracy: attempt ? num(attempt.accuracy, 0) : 0,
         channel: str(comp.channel),
+        paperStatus: paperStatus,
         answerStatus: attempt && attempt.missingAnswers ? 'pending' : 'ready',
         missingAnswers: attempt ? num(attempt.missingAnswers, 0) : 0,
         children: children,

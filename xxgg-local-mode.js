@@ -2253,13 +2253,13 @@ var seq = nextSeq();
 
     if (!comp) return Promise.resolve(fail('MIXED_PRACTICE_COMPOSITION_NOT_FOUND', 404));
     return resolveCompositionParts(id).then(function (parts) {
-      if (!parts || !parts.length) return fail('MIXED_PRACTICE_REVIEW_NOT_READY', 503);
       var found = null;
       var attempts = sortedAttempts();
       for (var i = 0; i < attempts.length; i++) {
         if (str(attempts[i].compositionId) === id) { found = attempts[i]; break; }
       }
       var useParts = found && isArray(found.parts) && found.parts.length ? found.parts : (parts || []);
+      if (!useParts.length) return fail('MIXED_PRACTICE_REVIEW_NOT_READY', 503);
 
       var children = [];
       var slots = comp ? asArray(comp.slots) : [];
