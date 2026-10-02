@@ -70,6 +70,121 @@ function harness({ initial = {}, fetch = async () => ok({}), local = false, comp
   return { ctx, window, localStorage, sessionStorage, events, api: ctx.api, profile: ctx.profile, auth: ctx.auth, submit: ctx.submit };
 }
 const session = { token: 'account-token', user: JSON.stringify({ id: 'student-1' }) };
+function ordinaryExam(h, channel = 'listening') {
+  const source = fs.readFileSync(path.join(root, 'assets/examDataService-BtCJRleA.js'), 'utf8');
+  Object.assign(h.ctx, { tt: 'https://api.test/api', We: h.api, Ae: h.auth, DOMException, oo: data => data, lt: value => String(value) === '1' ? 'listening' : value });
+  vm.runInContext(section(source, 'function Kn(t)', 'class to{')
+    + '\n' + section(source, 'class to{', 'const go=new to')
+    + '\nglobalThis.ordinary=new to;', h.ctx);
+  h.ctx.ordinary.setRuntimeData({ channel, parts: [unitPart(1)] }, 'unit-1');
+  return h.ctx.ordinary;
+}
+function submitState() {
+  return Object.fromEntries(['isSubmitting', 'submitFailed', 'submitErrorMessage', 'isExitConfirmed'].map(key => [key, { value: false }]));
+}
+
+test('shipped ordinary listening and reading submit without unsupported cache headers and enter review', async () => {
+  for (const channel of ['listening', 'reading']) {
+    for (const resultKey of ['resultId', 'attemptId']) {
+      const requests = [];
+      const h = harness({ initial: session, fetch: async (url, init) => {
+        requests.push({ url, init });
+        if (Object.keys(init.headers).some(key => /^(cache-control|pragma)$/i.test(key))) throw new TypeError('CORS preflight rejected');
+        return ok({ [resultKey]: 'ordinary-result' });
+      } });
+      const exam = ordinaryExam(h, channel), state = submitState();
+      let route, cleared = 0;
+      await h.submit({ submitFn: () => exam.submitAnswers({ 1: 'answer-1' }, { elapsedSeconds: 42 }),
+        routeQuery: { unitId: 'unit-1', channel }, state, clearProgress: () => cleared++,
+        router: { push: target => { route = target; } } });
+      assert.equal(state.submitFailed.value, false);
+      assert.equal(route.name, 'ExamReview');
+      assert.equal(route.query.resultId, 'ordinary-result');
+      assert.equal(route.query.compositionId, undefined);
+      assert.equal(cleared, 1);
+      assert.equal(requests.length, 1);
+      assert.equal(requests[0].init.mode, 'cors');
+      assert.equal(requests[0].init.credentials, 'omit');
+      const body = JSON.parse(requests[0].init.body);
+      assert.equal(body.unitId, 'unit-1');
+      assert.equal(body.channel, channel);
+      assert.equal(body.timer.elapsedSeconds, 42);
+      assert.equal(body.parts[0].groups[0].questions[0].userAnswer, 'answer-1');
+      expectSession(h);
+    }
+  }
+});
+
+test('ordinary submission handles permission errors and an old-token expiry without clearing the current session', async () => {
+  for (const response of [() => json({ code: '10403', msg: 'FORBIDDEN' }), () => json({ code: '403', msg: 'FORBIDDEN' }, 403)]) {
+    const h = harness({ initial: session, fetch: async () => response() }), exam = ordinaryExam(h), state = submitState();
+    let cleared = false;
+    await h.submit({ submitFn: () => exam.submitAnswers({}), routeQuery: { unitId: 'unit-1' }, state,
+      clearProgress: () => { cleared = true; }, router: { push() { assert.fail('permission error must retain the exam'); } } });
+    assert.equal(cleared, false);
+    assert.match(state.submitErrorMessage.value, /无权/);
+    expectSession(h);
+  }
+  let reply;
+  const h = harness({ initial: session, fetch: () => new Promise(resolve => { reply = resolve; }) });
+  const pending = ordinaryExam(h).submitAnswers({});
+  h.localStorage.setItem('token', 'new-account-token');
+  reply(json({ code: '401', msg: 'AUTH_REQUIRED' }, 401));
+  await assert.rejects(() => pending);
+  assert.equal(h.localStorage.getItem('token'), 'new-account-token');
+  assert.deepEqual(h.events, []);
+});
+
+test('ordinary network failure and missing result identifiers retain the draft, and retry succeeds', async () => {
+  for (const failure of ['network', 'missing-id']) {
+    let ready = false;
+    const h = harness({ initial: session, fetch: async () => {
+      if (ready) return ok({ resultId: 'retry-result' });
+      if (failure === 'network') throw new TypeError('Failed to fetch');
+      return ok({ status: 'submitted' });
+    } }), exam = ordinaryExam(h), state = submitState();
+    let cleared = 0, navigated = 0;
+    const args = { submitFn: () => exam.submitAnswers({ 1: 'answer-1' }), routeQuery: { unitId: 'unit-1' }, state,
+      clearProgress: () => cleared++, router: { push: () => navigated++ } };
+    await h.submit(args);
+    assert.equal(cleared, 0);
+    assert.equal(navigated, 0);
+    assert.match(state.submitErrorMessage.value, failure === 'network' ? /网络连接失败/ : /缺少记录编号/);
+    ready = true;
+    await h.submit(args);
+    assert.equal(cleared, 1);
+    assert.equal(navigated, 1);
+    expectSession(h);
+  }
+});
+
+test('ordinary validation refusals never expire the session or claim a successful submit', async () => {
+  for (const message of ['INVALID_TIMER_MODE', 'Practice question number mismatch: question-1', 'Question rightAnswer is empty: question-1']) {
+    const h = harness({ initial: session, fetch: async () => json({ code: '401', msg: message }) });
+    await assert.rejects(() => ordinaryExam(h).submitAnswers({}), error => error.businessCode === message && !error.authExpired);
+    expectSession(h);
+  }
+  const h = harness({ initial: session, fetch: async () => json({ code: '401', msg: 'PRACTICE_AUTH_REQUIRED' }) });
+  await assert.rejects(() => ordinaryExam(h).submitAnswers({}), error => error.authExpired);
+  assert.equal(h.localStorage.getItem('token'), null);
+});
+
+test('ordinary local submission persists graded answers in the session backup or reports storage full', async () => {
+  for (const rejectSessionStorage of [false, true]) {
+    const h = harness({ local: true, rejectStorage: true, rejectSessionStorage,
+      fetch: async () => ok({ parts: [unitPart(1, true)] }) });
+    const exam = ordinaryExam(h);
+    if (rejectSessionStorage) {
+      await assert.rejects(() => exam.submitAnswers({ 1: 'answer-1' }), error => error.status === 507);
+    } else {
+      const result = await exam.submitAnswers({ 1: 'answer-1' });
+      const reloaded = harness({ local: true, sharedStorage: h.localStorage, sharedSessionStorage: h.sessionStorage });
+      const review = await reloaded.api.getAttemptReview(result.data.resultId);
+      assert.equal(review.details[0].userAnswer, 'answer-1');
+      assert.equal(review.attempt.score, 1);
+    }
+  }
+});
 function expectSession(h) {
   assert.equal(h.localStorage.getItem('token'), session.token);
   assert.equal(h.localStorage.getItem('user'), session.user);
