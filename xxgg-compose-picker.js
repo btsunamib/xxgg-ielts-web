@@ -168,7 +168,7 @@
       renderList();
       renderCount();
     });
-    on('xxgg-cp-refresh', 'click', function () { load(); });
+    on('xxgg-cp-refresh', 'click', function () { load(true); });
     on('xxgg-cp-search', 'input', function (e) {
       state.query = e.target.value || '';
       renderList();
@@ -213,6 +213,7 @@
         state.channel = c;
         var sel = readSel();
         sel.channel = c;
+        sel.unitIds = [];
         writeSel(sel);
         state.units = [];
         renderAll();
@@ -363,7 +364,10 @@
   /* ------------------------------------------------------------------ */
   /* data                                                                */
   /* ------------------------------------------------------------------ */
-  function load() {
+  function load(refresh) {
+    var channel = state.channel;
+    var sequence = (state.loadSequence || 0) + 1;
+    state.loadSequence = sequence;
     var h = api();
     state.error = '';
     if (!h) {
@@ -377,8 +381,9 @@
     state.loading = true;
     renderList();
     Promise.resolve()
-      .then(function () { return h.listUnits(state.channel); })
+      .then(function () { return h.listUnits(channel, refresh === true); })
       .then(function (units) {
+        if (state.loadSequence !== sequence || state.channel !== channel) return;
         state.loading = false;
         state.units = (units && units.length ? units : []).slice();
         for (var i = 0; i < state.units.length; i++) {
@@ -388,6 +393,7 @@
         renderList();
         renderCount();
       }, function () {
+        if (state.loadSequence !== sequence || state.channel !== channel) return;
         state.loading = false;
         state.error = T.failed;
         renderList();
@@ -412,7 +418,7 @@
 
   W.__xxggComposePicker = {
     open: function () { ensureHost(); setOpen(true); },
-    reload: function () { ensureHost(); setOpen(true); load(); },
+    reload: function () { ensureHost(); setOpen(true); load(true); },
     read: function () { return readSel(); }
   };
 })();
