@@ -107,6 +107,9 @@
   function lsGet(k) { return safe(function () { return W.localStorage.getItem(k); }, null); }
   function lsSet(k, v) { return safe(function () { W.localStorage.setItem(k, v); return true; }, false); }
   function lsDel(k) { return safe(function () { W.localStorage.removeItem(k); return true; }, false); }
+  function ssGet(k) { return safe(function () { return W.sessionStorage.getItem(k); }, null); }
+  function ssSet(k, v) { return safe(function () { W.sessionStorage.setItem(k, v); return true; }, false); }
+  function storedJson(raw) { return raw ? safe(function () { return JSON.parse(raw); }, null) : null; }
 
   function readToken() { return str(lsGet(TOKEN_KEY)); }
   function isRealToken(t) {
@@ -179,6 +182,7 @@
         composeStore = blankComposeStore();
         answerCache = blankAnswers();
         lsDel(COMPOSE_KEY);
+        safe(function () { W.sessionStorage.removeItem(COMPOSE_KEY); }, null);
         lsDel(ANSWERS_KEY);
         saveComposeStore();
         saveAnswers();
@@ -390,6 +394,8 @@
 
   var composeStore = blankComposeStore();
   var answerCache = blankAnswers();
+  var activeCompositionId = '';
+  var storageClock = Date.now();
 
   function normalizeComposeStore(data) {
     var out = blankComposeStore();
@@ -401,25 +407,42 @@
   }
 
   function loadComposeStore() {
-    var raw = lsGet(COMPOSE_KEY);
-    var parsed = raw ? safe(function () { return JSON.parse(raw); }, null) : null;
-    composeStore = normalizeComposeStore(parsed);
+    composeStore = normalizeComposeStore(storedJson(lsGet(COMPOSE_KEY)));
+    mergeSavedCompositions();
   }
 
-  function pruneCompositions() {
-    var ids = Object.keys(composeStore.compositions);
-    if (ids.length <= MAX_CACHED_COMPOSITIONS) return;
+  function mergeSavedCompositions() {
+    // Every page has its own memory. Read durable records again before writing
+    // so an older tab cannot overwrite papers created by a newer one.
+    var savedStores = [storedJson(ssGet(COMPOSE_KEY)), storedJson(lsGet(COMPOSE_KEY))];
+    for (var si = 0; si < savedStores.length; si++) {
+      var saved = normalizeComposeStore(savedStores[si]);
+      composeStore.seq = Math.max(composeStore.seq, saved.seq);
+      var ids = Object.keys(saved.compositions);
+      for (var i = 0; i < ids.length; i++) {
+        var current = composeStore.compositions[ids[i]];
+        var incoming = saved.compositions[ids[i]];
+        if (!isPlainObject(current) || num(incoming && incoming.storageRevision, 0) > num(current.storageRevision, 0)) {
+          composeStore.compositions[ids[i]] = incoming;
+        }
+      }
+      var units = Object.keys(saved.doneUnits);
+      for (var j = 0; j < units.length; j++) if (saved.doneUnits[units[j]] === 1) composeStore.doneUnits[units[j]] = 1;
+    }
+  }
+
+  function pruneCompositions(snapshot) {
+    var ids = Object.keys(snapshot.compositions);
     var rows = [];
     for (var i = 0; i < ids.length; i++) {
-      var c = composeStore.compositions[ids[i]];
+      var c = snapshot.compositions[ids[i]];
+      // Unsubmitted and partially submitted papers are drafts, regardless of
+      // their age. Never evict them to make space for another paper.
+      if (!c || !c.attempt || ids[i] === activeCompositionId || (mixedSubmissions && mixedSubmissions[ids[i]])) continue;
       rows.push({ id: ids[i], t: Date.parse(str(c && c.createdAt)) || 0 });
     }
     rows.sort(function (a, b) { return b.t - a.t; });
-    var keep = {};
-    for (var j = 0; j < rows.length && j < MAX_CACHED_COMPOSITIONS; j++) keep[rows[j].id] = 1;
-    for (var k = 0; k < ids.length; k++) {
-      if (!keep[ids[k]]) delete composeStore.compositions[ids[k]];
-    }
+    for (var j = MAX_CACHED_COMPOSITIONS; j < rows.length; j++) delete snapshot.compositions[rows[j].id];
   }
 
   /* ------------------------------------------------------------------ */
@@ -470,26 +493,22 @@
     return out;
   }
 
-  function saveComposeStore() {
-    pruneCompositions();
-    for (var attempt = 0; attempt < 4; attempt++) {
-      var text = safe(function () { return JSON.stringify(slimForStorage(composeStore)); }, null);
-      if (text === null) return false;
-      if (lsSet(COMPOSE_KEY, text)) return true;
-      // Quota exhausted: drop the oldest composition and retry.
-      var ids = Object.keys(composeStore.compositions);
-      if (!ids.length) return false;
-      var oldest = null;
-      var oldestTs = Infinity;
-      for (var i = 0; i < ids.length; i++) {
-        var c = composeStore.compositions[ids[i]];
-        var t = Date.parse(str(c && c.createdAt)) || 0;
-        if (t < oldestTs) { oldestTs = t; oldest = ids[i]; }
-      }
-      if (oldest === null) return false;
-      delete composeStore.compositions[oldest];
+  function saveComposeStore(changedId) {
+    var current = composeStore.compositions[changedId || activeCompositionId];
+    if (isPlainObject(current)) {
+      storageClock = Math.max(Date.now(), storageClock + 1, num(current.storageRevision, 0) + 1);
+      current.storageRevision = storageClock;
     }
-    return false;
+    mergeSavedCompositions();
+    var snapshot = slimForStorage(composeStore);
+    pruneCompositions(snapshot);
+    var text = safe(function () { return JSON.stringify(snapshot); }, null);
+    if (text === null) return false;
+    // A separate session copy survives reloads in this tab when localStorage
+    // is full. A failed write must NEVER mutate the live composition tree.
+    var sessionSaved = ssSet(COMPOSE_KEY, text);
+    var primarySaved = lsSet(COMPOSE_KEY, text);
+    return primarySaved || sessionSaved;
   }
 
   function nextCompositionSeq() {
@@ -502,8 +521,25 @@
 
   function getComposition(id) {
     var key = str(id);
+    activeCompositionId = key;
+    mergeSavedCompositions();
     var c = composeStore.compositions[key];
-    return isPlainObject(c) ? c : null;
+    if (isPlainObject(c)) return c;
+    // The same paper may have been composed before the user signed in. Import
+    // only its source slots, never a locally graded attempt as a server result.
+    var localStores = [storedJson(ssGet('xxgg.local.compose.v1')), storedJson(lsGet('xxgg.local.v1'))];
+    for (var i = 0; i < localStores.length; i++) {
+      var saved = localStores[i];
+      c = saved && saved.compositions && saved.compositions[key];
+      if (!isPlainObject(c) || !asArray(c.slots).length) continue;
+      var recovered = { id: key, compositionId: key, channel: normalizeChannel(c.channel),
+        createdAt: c.createdAt || nowIso(), slots: cloneJson(c.slots),
+        partUnits: {}, groupUnits: {}, questionUnits: {}, exam: null, attempt: null };
+      composeStore.compositions[key] = recovered;
+      saveComposeStore(key);
+      return recovered;
+    }
+    return null;
   }
 
   function loadAnswers() {
@@ -1003,7 +1039,7 @@
       comp.partUnits = partUnits;
       comp.groupUnits = groupUnits;
       comp.questionUnits = questionUnits;
-      saveComposeStore();
+      saveComposeStore(id);
       return payload;
     });
   }
@@ -1259,7 +1295,8 @@
           }
 
           var seq = nextCompositionSeq();
-          var compositionId = 'local-mix-' + seq;
+          var compositionId = 'local-mix-server-' + seq + '-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10);
+          activeCompositionId = compositionId;
           composeStore.compositions[compositionId] = {
             id: compositionId,
             compositionId: compositionId,
@@ -1276,7 +1313,7 @@
             exam: null,
             attempt: null
           };
-          saveComposeStore();
+          if (!saveComposeStore(compositionId)) return fail('MIXED_PRACTICE_STORAGE_FULL', 507);
 
           return ok({
             compositionId: compositionId,
@@ -1642,7 +1679,7 @@
               composeStore.doneUnits[uid] = 1;
               // Save each accepted result immediately. A later unit or review
               // failure must not lose it or create duplicate server attempts.
-              saveComposeStore();
+              saveComposeStore(id);
             }
             return r;
           }, function () {
@@ -1743,7 +1780,7 @@
           };
           comp.attempt.missingAnswers = missingAnswers(graded);
           comp.lastAttemptId = unitResultIds[0];
-          saveComposeStore();
+          saveComposeStore(id);
 
           if (webCfg.debug) {
             safe(function () {
