@@ -382,7 +382,7 @@ test('refused unit submissions keep answers as a draft and do not claim success'
   let cleared = false;
   const state = Object.fromEntries(['isSubmitting', 'submitFailed', 'submitErrorMessage', 'isExitConfirmed'].map(key => [key, { value: false }]));
   await h.submit({
-    submitFn: async () => ({ success: true, data: await h.api.submitMixedPracticeAttempt(compositionId, { channel: 'listening', parts: [{ id: 'part-1', groups: [] }] }) }),
+    submitFn: async () => ({ success: true, data: await h.api.submitMixedPracticeAttempt(compositionId, submittedPaper()) }),
     router: { push: () => { navigated = true; } },
     routeQuery: { sessionType: 'mixed', compositionId }, state, clearProgress: () => { cleared = true; },
   });
@@ -427,4 +427,213 @@ test('a session renewal cannot clear or overwrite a login made while it was in f
     assert.equal(h.localStorage.getItem('token'), 'new-account-token');
     assert.deepEqual(h.events, []);
   }
+});
+
+test('grading requires the complete answer and accepts every declared alternative', () => {
+  for (const file of ['xxgg-server-compose.js', 'xxgg-local-mode.js']) {
+    const source = fs.readFileSync(path.join(root, file), 'utf8');
+    const ctx = vm.createContext({ str: v => v == null ? '' : String(v) });
+    vm.runInContext(section(source, '  function normalizeAnswer(v)', '  function qNumberOf(q)')
+      + '\nglobalThis.match=answersMatch;', ctx);
+    for (const [user, right, type, expected] of [
+      ['stone', 'notes', 'fill-in-the-blank', false],
+      ['apple', 'A', 'fill-in-the-blank', false],
+      ['apple', 'A', 'single-choice', false],
+      ['A', 'A,B', 'multiple-choice', false],
+      ['C,A', 'A,C', 'multiple-choice', true],
+      ['AAB', 'AB', 'multiple-choice', false],
+      ['cat', 'cat|kitten', 'fill-in-the-blank', true],
+      ['kitten', 'cat|kitten', 'fill-in-the-blank', true],
+      ['TRUE', 'true', 'single-choice', true],
+      ['  New  York ', 'new york', 'fill-in-the-blank', true],
+      ['1.0', '1', 'fill-in-the-blank', true],
+    ]) assert.equal(ctx.match(user, right, { type }), expected, `${file}: ${user} / ${right}`);
+  }
+});
+
+function submittedPaper() {
+  return { channel: 'listening', parts: slots.map((s, i) => ({ id: s.partId,
+    groups: [{ id: `group-${i + 1}`, questions: [{ qNumber: String(i + 1), userAnswer: `answer-${i + 1}` }] }],
+  })) };
+}
+
+test('partial submissions retain the draft and retry only failed units after reload', async () => {
+  let failed = true;
+  const posts = [];
+  const upstream = async (url, init) => {
+    const pathname = new URL(url).pathname;
+    let m;
+    if ((m = pathname.match(/\/units\/unit-(\d+)\/exam$/))) return ok({ parts: [unitPart(Number(m[1]))] });
+    if (pathname.endsWith('/practice/v1/attempts')) {
+      const uid = JSON.parse(init.body).unitId;
+      posts.push(uid);
+      if (uid === 'unit-4' && failed) return json({ code: '503', msg: 'TEMPORARILY_UNAVAILABLE' }, 503);
+      return ok({ resultId: `result-${uid.split('-')[1]}` });
+    }
+    if ((m = pathname.match(/\/results\/result-(\d+)\/review$/))) return ok({ parts: [unitPart(Number(m[1]), true)] });
+    throw new Error(pathname);
+  };
+  const h = harness({ initial: initialComposition(), compose: true, fetch: upstream });
+  let navigated = false, cleared = false;
+  const state = Object.fromEntries(['isSubmitting', 'submitFailed', 'submitErrorMessage', 'isExitConfirmed'].map(k => [k, { value: false }]));
+  await h.submit({ submitFn: async () => ({ success: true, data: await h.api.submitMixedPracticeAttempt(compositionId, submittedPaper()) }),
+    router: { push: () => { navigated = true; } }, routeQuery: { sessionType: 'mixed', compositionId }, state,
+    clearProgress: () => { cleared = true; } });
+  assert.equal(navigated, false);
+  assert.equal(cleared, false);
+  assert.equal(state.submitFailed.value, true);
+  const saved = JSON.parse(h.localStorage.getItem('xxgg.servercompose.v1'));
+  assert.equal(saved.doneUnits['unit-4'], undefined);
+  failed = false;
+  const reloaded = harness({ initial: { ...session, 'xxgg.servercompose.v1': JSON.stringify(saved) }, compose: true, fetch: upstream });
+  await reloaded.api.submitMixedPracticeAttempt(compositionId, submittedPaper());
+  assert.deepEqual(posts, ['unit-1', 'unit-2', 'unit-3', 'unit-4', 'unit-4']);
+  assert.equal((await reloaded.api.getMixedPracticeReview(compositionId)).score, 4);
+  expectSession(reloaded);
+});
+
+test('concurrent identical submits create just one accepted result per unit', async () => {
+  let posts = 0;
+  const h = harness({ initial: initialComposition(), compose: true, fetch: async (url, init) => {
+    const p = new URL(url).pathname;
+    let m;
+    if ((m = p.match(/\/units\/unit-(\d+)\/exam$/))) return ok({ parts: [unitPart(Number(m[1]))] });
+    if (p.endsWith('/practice/v1/attempts')) { posts++; return ok({ resultId: `result-${JSON.parse(init.body).unitId.split('-')[1]}` }); }
+    if ((m = p.match(/\/results\/result-(\d+)\/review$/))) return ok({ parts: [unitPart(Number(m[1]), true)] });
+    throw new Error(p);
+  } });
+  await Promise.all([h.api.submitMixedPracticeAttempt(compositionId, submittedPaper()), h.api.submitMixedPracticeAttempt(compositionId, submittedPaper())]);
+  assert.equal(posts, 4);
+});
+
+test('a failed passage load never becomes a cached incomplete composition', async () => {
+  let available = false;
+  let failedReads = 0;
+  const h = harness({ initial: initialComposition(), compose: true, fetch: async url => {
+    const m = new URL(url).pathname.match(/\/units\/unit-(\d+)\/exam$/);
+    assert.ok(m);
+    if (m[1] === '4') { failedReads++; if (!available) return json({ code: '503' }, 503); }
+    return ok({ parts: [unitPart(Number(m[1]))] });
+  } });
+  await assert.rejects(() => h.api.getMixedPracticeExam(compositionId), error => error.status === 503);
+  await assert.rejects(() => h.api.getMixedPracticeReview(compositionId), error => error.status === 503);
+  available = true;
+  assert.equal((await h.api.getMixedPracticeExam(compositionId)).parts.length, 4);
+  assert.equal(failedReads, 3);
+  expectSession(h);
+});
+
+test('a missing composition cannot open an empty successful exam', async () => {
+  const h = harness({ initial: session, compose: true });
+  await assert.rejects(() => h.api.getMixedPracticeExam('missing'), error => error.status === 404);
+});
+
+test('local practice uses the actual harvested-answer cache format', async () => {
+  const h = harness({ local: true, initial: { 'xxgg.answers.v1': JSON.stringify({
+    version: 1, byQuestionId: { 'question-1': 'answer-1' }, byUnitQ: {},
+  }) }, fetch: async () => ok({ channel: 'listening', parts: [unitPart(1)] }) });
+  const response = await h.window.fetch('https://api.test/api/practice/v1/attempts', {
+    method: 'POST', body: JSON.stringify({ unitId: 'unit-1', channel: 'listening', parts: submittedPaper().parts.slice(0, 1) }),
+  });
+  const result = (await response.json()).data;
+  const reviewResponse = await h.window.fetch(`https://api.test/api/practice/v1/results/${result.resultId}/review`);
+  const review = (await reviewResponse.json()).data;
+  assert.equal(review.details[0].rightAnswer, 'answer-1');
+  assert.equal(review.details[0].graded, true);
+  assert.equal(review.details[0].isCorrect, true);
+});
+
+test('a failed catalogue request can recover without reloading the application', async () => {
+  let available = false;
+  const h = harness({ initial: session, compose: true, fetch: async url => {
+    if (!available) return json({ code: '503' }, 503);
+    if (new URL(url).pathname.endsWith('/albums')) return ok([{ id: 'album-1' }]);
+    return ok([{ id: 'unit-1', channel: 'listening', partNo: 'Part 1' }]);
+  } });
+  assert.equal((await h.window.__xxggServerCompose.listUnits('listening')).length, 0);
+  available = true;
+  assert.equal((await h.window.__xxggServerCompose.listUnits('listening')).length, 1);
+});
+
+test('empty timer fields do not erase the recorded elapsed duration', () => {
+  const source = fs.readFileSync(path.join(root, 'xxgg-server-compose.js'), 'utf8');
+  const ctx = vm.createContext({ str: v => v == null ? '' : String(v), isPlainObject: v => !!v && typeof v === 'object', num: (v,d) => Number.isFinite(Number(v)) ? Number(v) : d });
+  vm.runInContext(section(source, '  function elapsedFromTimer(', '  /* ------------------------------------------------------------------ */\n  /* 5. review') + '\nglobalThis.elapsed=elapsedFromTimer;', ctx);
+  assert.equal(ctx.elapsed({ elapsedSeconds: null, elapsed: '', durationSeconds: 120 }, { elapsedSeconds: 60 }), 120);
+});
+
+test('a stale picker response cannot replace the newly selected channel', async () => {
+  const source = fs.readFileSync(path.join(root, 'xxgg-compose-picker.js'), 'utf8');
+  const replies = {};
+  const state = { channel: 'reading', units: [], loading: false, error: '' };
+  const ctx = vm.createContext({ state, T: {}, renderList() {}, renderCount() {},
+    api: () => ({ listUnits: channel => new Promise(resolve => { replies[channel] = resolve; }) }),
+  });
+  vm.runInContext(section(source, '  function load(', '  /* ------------------------------------------------------------------ */\n  /* boot') + '\nglobalThis.load=load;', ctx);
+  ctx.load();
+  await Promise.resolve();
+  state.channel = 'listening';
+  ctx.load();
+  await Promise.resolve();
+  replies.listening([{ unitId: 'listening-unit' }]);
+  await Promise.resolve(); await Promise.resolve();
+  replies.reading([{ unitId: 'reading-unit' }]);
+  await Promise.resolve(); await Promise.resolve();
+  assert.equal(state.units[0].unitId, 'listening-unit');
+});
+
+test('local mode refuses unavailable papers without saving an empty successful attempt', async () => {
+  const h = harness({ local: true, fetch: async () => json({ code: '503' }, 503) });
+  await assert.rejects(() => h.api.submitAttempt({ unitId: 'missing-unit', parts: [] }), error => error.status === 503);
+  await assert.rejects(() => h.api.getMixedPracticeExam('missing'), error => error.status === 404);
+  await assert.rejects(() => h.api.getMixedPracticeReview('missing'), error => error.status === 404);
+  assert.equal(Object.keys(h.window.__xxggLocalMode.store.attempts).length, 0);
+});
+
+test('an incomplete submitted paper never sends or claims a successful attempt', async () => {
+  let posts = 0;
+  const h = harness({ initial: initialComposition(), compose: true, fetch: async (url, init) => {
+    if (init.method === 'POST') posts++;
+    const m = new URL(url).pathname.match(/\/units\/unit-(\d+)\/exam$/);
+    return ok({ parts: m ? [unitPart(Number(m[1]))] : [] });
+  } });
+  const paper = submittedPaper(); paper.parts.pop();
+  await assert.rejects(() => h.api.submitMixedPracticeAttempt(compositionId, paper), error => error.status === 422);
+  assert.equal(posts, 0);
+});
+
+test('local mixed practice rebuilds previously cached incomplete papers and retries missing sources', async () => {
+  const parts = slots.slice(0, 3).map((s, i) => ({ ...unitPart(i + 1), originalUnitId: s.unitId }));
+  const initial = { 'xxgg.local.v1': JSON.stringify({ compositions: { [compositionId]: { slots, parts, channel: 'listening' } } }) };
+  let available = false;
+  const h = harness({ initial, local: true, fetch: async url => {
+    const m = new URL(url).pathname.match(/\/units\/unit-(\d+)\/exam$/);
+    assert.ok(m);
+    if (m[1] === '4' && !available) return json({ code: '503' }, 503);
+    return ok({ parts: [unitPart(Number(m[1]))] });
+  } });
+  await assert.rejects(() => h.api.getMixedPracticeExam(compositionId), error => error.status === 503);
+  await assert.rejects(() => h.api.submitMixedPracticeAttempt(compositionId, submittedPaper()), error => error.status === 503);
+  assert.equal(Object.keys(h.window.__xxggLocalMode.store.attempts).length, 0);
+  available = true;
+  assert.equal((await h.api.getMixedPracticeExam(compositionId)).parts.length, 4);
+});
+
+test('local grading resolves unit-number cache entries without a question-id cache hit', async () => {
+  const h = harness({ local: true, initial: { 'xxgg.answers.v1': JSON.stringify({ byQuestionId: {}, byUnitQ: { 'unit-1::1': 'answer-1' } }) },
+    fetch: async () => ok({ parts: [unitPart(1)] }) });
+  const result = await h.api.submitAttempt({ unitId: 'unit-1', channel: 'listening', parts: submittedPaper().parts.slice(0, 1) });
+  const response = await h.window.fetch(`https://api.test/api/practice/v1/results/${result.resultId}/review`);
+  assert.equal((await response.json()).data.details[0].isCorrect, true);
+});
+
+test('a catalogue refresh actually bypasses the successful cached list', async () => {
+  let title = 'Original';
+  const h = harness({ initial: session, compose: true, fetch: async url => {
+    if (new URL(url).pathname.endsWith('/albums')) return ok([{ id: 'album-1' }]);
+    return ok([{ id: 'unit-1', channel: 'listening', partNo: 'Part 1', titleEn: title }]);
+  } });
+  assert.equal((await h.window.__xxggServerCompose.listUnits('listening'))[0].titleEn, 'Original');
+  title = 'Updated';
+  assert.equal((await h.window.__xxggServerCompose.listUnits('listening', true))[0].titleEn, 'Updated');
 });
