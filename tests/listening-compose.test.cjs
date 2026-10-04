@@ -1289,6 +1289,86 @@ test('question audio waits for readiness, ignores stale parts, and survives an o
   h.ctx.wo(16); assert.equal(h.audio.paused, true);
 });
 
+function autoPlaybackRuntime() {
+  const timerSource = fs.readFileSync(path.join(root, 'assets/useExamTimerLifecycle-hzBFzOTc.js'), 'utf8');
+  const timer = vm.createContext({});
+  vm.runInContext(section(timerSource, 'function ye(e)', 'function vt(e)')
+    + section(timerSource, 'const ae=Object.freeze', 'const W=Object.freeze')
+    + 'globalThis.api={plan:Un,availability:Nt,state:xn,reduce:Ln,status:C,action:D,kinds:ae};', timer);
+  const listening = fs.readFileSync(path.join(root, 'assets/ListeningExamPage-Cf0rTFNO.js'), 'utf8');
+  const player = vm.createContext({ mt: timer.api.kinds, sn: 6, Ut: timer.api.state, dn: timer.api.reduce,
+    xe: timer.api.status, Oe: timer.api.action });
+  vm.runInContext(section(listening, 'function el(n=', 'const R=Object.freeze'), player);
+  return { timer: timer.api, player };
+}
+const autoParts = () => [4, 2, 1, 3].map(n => ({ partId: `edited-${n}`, partNumber: n,
+  label: `Part ${n}`, audioUrl: `audio-${n}.mp3` }));
+
+test('mixed listening offers four-Part automatic playback without guidance and keeps configured guidance optional', () => {
+  const { timer } = autoPlaybackRuntime();
+  for (const guidanceBoundaryEnabled of [false, true]) {
+    const plan = timer.plan({ isMixedListening: true, guidanceBoundaryEnabled, parts: autoParts() });
+    assert.equal(plan.ready, true);
+    assert.equal(timer.availability(plan).selectable, true);
+    assert.deepEqual(Array.from(plan.steps, step => step.partNumber), [1, 2, 3, 4]);
+    assert.deepEqual(Array.from(plan.steps, step => step.index), [0, 1, 2, 3]);
+    assert.deepEqual(Array.from(plan.requiredUrls), [1, 2, 3, 4].map(n => `audio-${n}.mp3`));
+  }
+  const guided = timer.plan({ isMixedListening: true, guidanceBoundaryEnabled: true,
+    unitIntro: { audioUrl: 'intro.mp3' }, unitOutro: { audioUrl: 'outro.mp3' }, parts: autoParts() });
+  assert.deepEqual(Array.from(guided.steps, step => step.audioUrl), ['intro.mp3', ...[1, 2, 3, 4].map(n => `audio-${n}.mp3`), 'outro.mp3']);
+});
+
+test('incomplete or invalid mixed audio remains disabled instead of skipping a missing Part', () => {
+  const { timer } = autoPlaybackRuntime();
+  const missing = autoParts(); missing[2].audioUrl = '';
+  const duplicate = autoParts(); duplicate[1].partId = duplicate[0].partId;
+  for (const parts of [autoParts().slice(0, 3), missing, duplicate]) {
+    const plan = timer.plan({ isMixedListening: true, guidanceBoundaryEnabled: false, parts });
+    assert.equal(plan.ready, false);
+    assert.equal(timer.availability(plan).selectable, false);
+    assert.equal(timer.availability(plan).rendered, true);
+    assert.equal(plan.steps.length, 0);
+  }
+});
+
+test('mixed auto playback follows selected Part identities, rejects stale endings, and prompts exactly once at the end', () => {
+  const { timer, player } = autoPlaybackRuntime();
+  const plan = timer.plan({ isMixedListening: true, guidanceBoundaryEnabled: false, parts: autoParts() });
+  const items = player.tl(plan.steps), played = [];
+  let terminal = 0, failure = 0;
+  const run = player.nl({ playStep(index) { played.push(player.al(items, index)); },
+    requestTerminalDecision() { terminal++; }, fail() { failure++; } });
+  run.start(plan.steps.length); const generation = run.generation;
+  run.handleStepEnded(0, generation - 1);
+  assert.deepEqual(played, ['edited-1']);
+  for (let index = 0; index < 4; index++) {
+    run.handleStepEnded(index, generation);
+    run.handleStepEnded(index, generation);
+  }
+  assert.deepEqual(played, [1, 2, 3, 4].map(n => `edited-${n}`));
+  assert.equal(terminal, 1); assert.equal(failure, 0);
+  run.start(4); const newGeneration = run.generation;
+  run.handleStepEnded(3, generation);
+  assert.equal(run.currentIndex, 0);
+  run.handleStepError(0, newGeneration, 'play_rejected');
+  assert.equal(run.status, 'failed'); assert.equal(failure, 1);
+  run.handleStepEnded(0, newGeneration); assert.equal(terminal, 1);
+  run.invalidate(); run.handleStepEnded(0, newGeneration);
+  assert.equal(run.status, 'invalidated');
+});
+
+test('auto playback waits for exam start and audio readiness and never restarts the same setup automatically', () => {
+  const { player } = autoPlaybackRuntime();
+  const ready = { dataLoaded: true, hasStarted: true, isAutoMode: true, planReady: true,
+    preloadReady: true, runActive: false, setupEpoch: 1, startedEpoch: -1, runStatus: 'idle' };
+  assert.equal(player.el(ready), true);
+  for (const change of [{ hasStarted: false }, { preloadReady: false }, { isAutoMode: false },
+    { planReady: false }, { runActive: true }, { startedEpoch: 1 }, { runStatus: 'failed' }, { runStatus: 'ended' }]) {
+    assert.equal(player.el({ ...ready, ...change }), false);
+  }
+});
+
 test('a disposed picker response cannot replace the newly selected channel', async () => {
   const replies = {};
   const picker = pickerRuntime(channel => new Promise(resolve => { replies[channel] = resolve; }));
