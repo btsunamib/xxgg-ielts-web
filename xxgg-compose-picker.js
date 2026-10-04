@@ -41,7 +41,7 @@
       ".xxgg-ce-head{justify-content:space-between;margin:12px 0;flex-wrap:wrap}.xxgg-ce-muted{color:var(--color-text-secondary,#71727a);font-size:12px}" +
       ".xxgg-ce-row{padding:11px 12px;border:1px solid var(--color-border-light,#e0e0e0);border-radius:8px;margin:7px 0}" +
       ".xxgg-ce-row.is-active{border-color:var(--accent,#3a6ea8);background:var(--accent-soft,rgba(58,110,168,.05))}" +
-      ".xxgg-ce-part{font-weight:600;flex:none}.xxgg-ce-title{flex:1;min-width:0;overflow-wrap:anywhere}" +
+      ".xxgg-ce-slot-actions{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}.xxgg-ce-part{font-weight:600;flex:none}.xxgg-ce-title{flex:1;min-width:0;overflow-wrap:anywhere}" +
       ".xxgg-ce-btn{font:inherit;font-size:12px;cursor:pointer;padding:7px 11px;line-height:1.3;border-radius:6px;border:1px solid var(--color-border-light,#e0e0e0);color:inherit;background:transparent;flex:none}" +
       ".xxgg-ce-btn:disabled{cursor:default;opacity:.45}.xxgg-ce-btn:focus-visible,.xxgg-ce-search:focus-visible{outline:2px solid var(--accent,#3a6ea8);outline-offset:2px}" +
       ".xxgg-ce-primary{background:var(--accent,#3a6ea8);border-color:var(--accent,#3a6ea8);color:#fff}" +
@@ -76,6 +76,41 @@
         return u && rank(u) === index + 1 && units.some(function (candidate) { return id(candidate) === id(u); });
       });
     }
+    function candidates(index, draft) {
+      draft = draft || selected;
+      var seen = Object.create(null);
+      return units.filter(function (u) {
+        var uid = id(u);
+        if (!uid || seen[uid] || rank(u) !== index + 1) return false;
+        if (draft.some(function (choice, other) { return other !== index && id(choice) === uid; })) return false;
+        seen[uid] = true;
+        return true;
+      });
+    }
+    function randomChoice(index, draft) {
+      var pool = candidates(index, draft);
+      var alternatives = pool.filter(function (u) { return id(u) !== id(selected[index]); });
+      if (alternatives.length) pool = alternatives;
+      return pool.length ? pool[Math.floor(Math.random() * pool.length)] : null;
+    }
+    function randomPart(index) {
+      if (disposed || busy || loading || index < 0 || index >= need) return;
+      var choice = randomChoice(index);
+      if (!choice) { error = 'P' + (index + 1) + ' 暂无可选篇目，请刷新题库后重试。'; render(); return; }
+      selected[index] = choice;
+      active = index; query = ''; error = ''; render();
+    }
+    function randomAll() {
+      if (disposed || busy || loading) return;
+      var replaceAll = complete(), next = selected.slice();
+      for (var i = 0; i < need; i++) {
+        if (!replaceAll && selected[i] && candidates(i, next).some(function (u) { return id(u) === id(selected[i]); })) continue;
+        var choice = randomChoice(i, next);
+        if (!choice) { error = 'P' + (i + 1) + ' 暂无可选篇目，请刷新题库后重试。'; render(); return; }
+        next[i] = choice;
+      }
+      selected = next; active = -1; query = ''; error = ''; render();
+    }
     function bind(action, handler) {
       var elements = root.querySelectorAll('[data-ce-action="' + action + '"]');
       for (var i = 0; i < elements.length; i++) elements[i].addEventListener('click', handler);
@@ -84,14 +119,17 @@
       if (disposed) return;
       var count = selected.filter(Boolean).length;
       var html = '<div class="xxgg-ce-head"><strong>' + (prior.length ? '调整本套篇目' : '自选篇目') + '</strong>' +
-        '<span class="xxgg-ce-muted">已选 ' + count + ' / ' + need + ' 篇</span></div>' +
-        '<p class="xxgg-ce-muted">每个 Part 选择一篇。确认后按这份清单生成试卷。</p><div class="xxgg-ce-slots">';
+        '<span class="xxgg-ce-muted">已选 ' + count + ' / ' + need + ' 篇</span><button type="button" class="xxgg-ce-btn" data-ce-action="random-all"' +
+        (busy || loading ? ' disabled' : '') + '>' + (complete() ? '随机换一组' : '随机选满') + '</button></div>' +
+        '<p class="xxgg-ce-muted">每个 Part 选择一篇；随机选满会保留已选篇目。选好后仍可逐篇替换。</p><div class="xxgg-ce-slots">';
       for (var i = 0; i < need; i++) {
         html += '<div class="xxgg-ce-row' + (active === i ? ' is-active' : '') + '">' +
           '<span class="xxgg-ce-part">P' + (i + 1) + '</span><span class="xxgg-ce-title">' + esc(title(selected[i])) + '</span>' +
+          '<div class="xxgg-ce-slot-actions"><button type="button" class="xxgg-ce-btn" data-ce-action="random-part" data-index="' + i + '" aria-label="随机选 P' + (i + 1) + ' 篇目"' +
+          (busy || loading || !candidates(i).length ? ' disabled' : '') + '>随机选</button>' +
           '<button type="button" class="xxgg-ce-btn" data-ce-action="edit" data-index="' + i + '" aria-label="' +
           (selected[i] ? '替换' : '选择') + ' P' + (i + 1) + ' 篇目"' + (busy ? ' disabled' : '') + '>' +
-          (selected[i] ? '替换' : '选择') + '</button></div>';
+          (selected[i] ? '替换' : '选择') + '</button></div></div>';
       }
       html += '</div>';
       if (active >= 0 && active < need) html += '<div class="xxgg-ce-browser"><div class="xxgg-ce-head"><strong>选择 P' +
@@ -107,6 +145,8 @@
       root.innerHTML = html;
       bind('edit', function (event) { active = Number(event.currentTarget.getAttribute('data-index')); query = ''; render(); });
       bind('refresh', function () { load(true); });
+      bind('random-part', function (event) { randomPart(Number(event.currentTarget.getAttribute('data-index'))); });
+      bind('random-all', randomAll);
       bind('cancel', function () { if (typeof options.onCancel === 'function') options.onCancel(); });
       bind('apply', apply);
       var search = root.querySelector('.xxgg-ce-search');
