@@ -669,7 +669,7 @@ test('a failed analysis request leaves the saved answer and embedded explanation
     ie: ref(null), he: ref(false), Ve: h.api, Ne: () => {}, k: ref(null), D: () => {}, ct: v => v,
   });
   vm.runInContext(section(reviewSource, 'function xxggReviewExplanation', 'const Fo=')
-    + section(reviewSource, 'async function vn(t)', 'function kr(t)') + '\nglobalThis.select=vn;', h.ctx);
+    + section(reviewSource, 'async function vn(', 'function kr(t)') + '\nglobalThis.select=vn;', h.ctx);
   await h.ctx.select(1);
   assert.equal(h.ctx.ie.value.analysisList[0].content, 'Existing explanation');
   assert.equal(h.ctx.H.value[1].rightAnswer, 'answer-1');
@@ -1129,13 +1129,245 @@ function editorRoot() {
     .find(node => value == null || node.attrs['data-unit-id'] === value || node.attrs['data-index'] === String(value));
   return root;
 }
-function pickerRuntime(listUnits) {
+function pickerRuntime(listUnits, random = Math.random) {
   const window = { document: { getElementById: () => null, createElement: () => ({}), head: { appendChild() {} } },
     localStorage: storage(), __xxggServerCompose: { listUnits } };
-  vm.runInNewContext(fs.readFileSync(path.join(root, 'xxgg-compose-picker.js'), 'utf8'), { window });
+  vm.runInNewContext(fs.readFileSync(path.join(root, 'xxgg-compose-picker.js'), 'utf8'), { window, Math: Object.assign(Object.create(Math), { random }) });
   return window.__xxggComposePicker;
 }
 const settleEditor = () => new Promise(resolve => setImmediate(resolve));
+
+for (const channel of ['reading', 'listening']) {
+  test(`${channel} random picker preserves manual slots, replaces one Part, and reshuffles a complete paper`, async () => {
+    const need = channel === 'reading' ? 3 : 4;
+    const units = Array.from({ length: need }, (_, i) => ['a', 'b'].map(variant => ({
+      unitId: `${i + 1}-${variant}`, partRank: i + 1, titleEn: `Part ${i + 1} ${variant}`,
+    }))).flat();
+    let applied;
+    const picker = pickerRuntime(async () => units, () => 0);
+    const root = editorRoot();
+    picker.mount(root, { channel, onApply: async ids => { applied = Array.from(ids); } });
+    await settleEditor();
+    root.action('choose', '1-b').click();
+    root.action('random-all').click();
+    assert.match(root.innerHTML, /随机换一组/);
+    root.action('apply').click(); await settleEditor();
+    assert.deepEqual(applied, ['1-b', ...Array.from({ length: need - 1 }, (_, i) => `${i + 2}-a`)]);
+    root.action('random-part', 1).click();
+    root.action('apply').click(); await settleEditor();
+    assert.deepEqual(applied, ['1-b', '2-b', ...Array.from({ length: need - 2 }, (_, i) => `${i + 3}-a`)]);
+    root.action('random-all').click();
+    root.action('apply').click(); await settleEditor();
+    assert.deepEqual(applied, ['1-a', '2-a', ...Array.from({ length: need - 2 }, (_, i) => `${i + 3}-b`)]);
+    root.action('edit', 0).click();
+    root.action('choose', '1-b').click();
+    root.action('apply').click(); await settleEditor();
+    assert.equal(applied[0], '1-b', 'random choices remain manually editable');
+  });
+}
+
+test('random fill is atomic when a Part has no candidates and cannot modify a pending submission', async () => {
+  let finish;
+  const units = [1, 2, 3].map(n => ({ unitId: `p${n}`, partRank: n, titleEn: `Passage ${n}` }));
+  const root = editorRoot();
+  pickerRuntime(async () => units, () => 0).mount(root, { channel: 'listening' });
+  await settleEditor();
+  root.action('choose', 'p1').click(); root.action('random-all').click();
+  assert.match(root.innerHTML, /已选 1 \/ 4/);
+  assert.match(root.innerHTML, /P4 暂无可选篇目/);
+  assert.equal(root.action('apply').disabled, true);
+  const pending = editorRoot();
+  const all = [...units, { unitId: 'p4', partRank: 4, titleEn: 'Passage 4' }];
+  pickerRuntime(async () => all, () => 0).mount(pending, { channel: 'listening',
+    onApply: () => new Promise(resolve => { finish = resolve; }) });
+  await settleEditor(); pending.action('random-all').click(); pending.action('apply').click();
+  assert.equal(pending.action('random-all').disabled, true);
+  assert.ok(pending.querySelectorAll('[data-ce-action="random-part"]').every(button => button.disabled));
+  finish(); await settleEditor();
+  assert.equal(pending.action('random-all').disabled, false);
+});
+
+function questionReviewRuntime(fetchAnalysis = async () => null) {
+  const ref = value => ({ value });
+  const emitted = [], ticks = [];
+  const ctx = vm.createContext({ console: { error() {} },
+    d: ref('p1'), ae: ref(1), W: ref(false), P: ref(false), L: ref('result'), f: ref(false),
+    Te: ref({}), I: ref({ 1: { questionId: 'q1', partId: 'p1' }, 2: { questionId: 'q2', partId: 'p1' } }),
+    ze: { parts: [] }, H: ref({}), ie: ref(null), he: ref(false), k: ref(null), B: ref({}), yt: ref({}),
+    Ou: (p, q) => `${p}::${q}`, Ve: { getQuestionAnalysis: fetchAnalysis },
+    Ne: callback => ticks.push(callback), Nt: (kind, indexes) => emitted.push({ kind, indexes: Array.from(indexes) }),
+    C: () => false, D() {}, Dn() {}, jn() {},
+  });
+  vm.runInContext(section(reviewSource, 'function _u()', 'const Cu=') + 'globalThis.$=_u();'
+    + section(reviewSource, 'function ct(t)', 'const yt=')
+    + section(reviewSource, 'function xxggReviewExplanation', 'const Fo=')
+    + section(reviewSource, 'function gn(t)', 'function Vn()')
+    + section(reviewSource, 'async function vn(', 'function kr(t)'), ctx);
+  return { ctx, emitted, flush() { while (ticks.length) ticks.shift()(); } };
+}
+
+test('hidden-answer question and footer clicks request audio without changing answer visibility', async () => {
+  const h = questionReviewRuntime();
+  h.ctx.Te.value = { 'p1::1': { sentenceIndex: '3-4' }, 'p2::11': { sentenceIndex: 8 } };
+  h.ctx.gn(1); h.flush();
+  assert.deepEqual(h.emitted, [{ kind: 'play-question', indexes: [3, 4] }]);
+  h.ctx.gn(1); h.flush();
+  assert.equal(h.emitted.length, 2, 'clicking the same number restarts its audio');
+  h.ctx.wr('p2', 11); h.flush();
+  assert.deepEqual(h.emitted.at(-1), { kind: 'play-question', indexes: [8] });
+  assert.equal(h.ctx.P.value, false);
+  h.ctx.W.value = true; h.ctx.gn(11); h.flush();
+  assert.equal(h.emitted.length, 3, 'reading question clicks never start audio');
+});
+
+test('only the latest question analysis may start audio and embedded timestamps do not wait for it', async () => {
+  const replies = {};
+  const h = questionReviewRuntime(id => new Promise(resolve => { replies[id] = resolve; }));
+  h.ctx.ae.value = 1; const first = h.ctx.vn(1, true);
+  h.ctx.ae.value = 2; const second = h.ctx.vn(2, true);
+  replies.q2({ question: { sentenceIndex: '9-10' } }); await second; h.flush();
+  replies.q1({ question: { sentenceIndex: '3' } }); await first; h.flush();
+  assert.deepEqual(h.emitted, [{ kind: 'play-question', indexes: [9, 10] }]);
+  const embedded = questionReviewRuntime(() => new Promise(() => {}));
+  embedded.ctx.ze.parts = [{ id: 'p1', groups: [{ questions: [{ qNumber: 1, sentenceIndex: '5' }] }] }];
+  embedded.ctx.vn(1, true); embedded.flush();
+  assert.deepEqual(embedded.emitted, [{ kind: 'play-question', indexes: [5] }]);
+});
+
+const textPanelSource = fs.readFileSync(path.join(root, 'assets/TextPanel-CrX6bIZB.js'), 'utf8');
+function questionAudioRuntime(play = () => Promise.resolve()) {
+  const ref = value => ({ value });
+  const audio = { currentTime: 0, paused: true, starts: 0,
+    play() { this.paused = false; this.starts++; return play(); }, pause() { this.paused = true; } };
+  const groups = [3, 4, 9].map((sentenceIndex, i) => ({ sentenceIndex,
+    words: [{ text: 'word', start_time: 10 + i * 2, end_time: 12 + i * 2 }] }));
+  const ctx = vm.createContext({
+    O: ref(audio), Je: ref([{ sentenceGroups: groups }]),
+    Ge: ref(groups.map((group, i) => ({ key: `0-${i}-0`, word: group.words[0] }))),
+    C: ref([]), xxggQuestionKeys: ref([]), E: ref, Et: ref('none'),
+    ve: ref(false), oe: ref(false), Le: ref(0), xt: ref(1), H: ref(0), T: ref(true), te: ref(false),
+    o: { currentPartKey: 'p1', audioUrl: 'p1.mp3', answerRevealEnabled: false },
+    Ue: word => !word.text.trim(), Ce() {}, B: callback => callback(),
+    _: (get, watch) => { ctx.watch = watch; },
+  });
+  vm.runInContext(section(textPanelSource, 'const Ae=', 'function me(i,c)')
+    + section(textPanelSource, 'function he(e,t,n)', 'const et=')
+    + section(textPanelSource, 'function po(e)', 'function yo(e)')
+    + 'let Tt=null,Ve=null,xxggPlaybackGeneration=0,ht=null,bt=null;'
+    + section(textPanelSource, 'function nt()', 'function ko(e)')
+    + 'let Sn=0;'
+    + section(textPanelSource, 'function $o(e)', 'function zo(e)'), ctx);
+  return { ctx, audio, request(seq, indexes, ready = true, extra = {}) {
+    ctx.watch([{ seq, kind: 'play-question', partKey: 'p1', audioUrl: 'p1.mp3', sentenceIndexes: indexes, ...extra }, ready]);
+  } };
+}
+
+test('hidden-answer playback seeks and stops at question timestamps without selecting or highlighting answers', () => {
+  const h = questionAudioRuntime();
+  h.request(1, [3, 4]);
+  assert.equal(h.audio.currentTime, 10); assert.equal(h.audio.starts, 1);
+  assert.equal(h.ctx.C.value.length, 0);
+  assert.equal(h.ctx.o.answerRevealEnabled, false);
+  h.ctx.wo(14); assert.equal(h.audio.paused, true);
+  h.request(2, [3, 4]); assert.equal(h.audio.starts, 2);
+  h.request(3, [9]); assert.equal(h.audio.currentTime, 14);
+  h.request(4, [99]); assert.equal(h.audio.starts, 3);
+  assert.equal(h.audio.paused, true, 'missing timestamps cannot continue the old question or play the whole clip');
+});
+
+test('question audio waits for readiness, ignores stale parts, and survives an older rejected play promise', async () => {
+  const reject = [];
+  const h = questionAudioRuntime(() => new Promise((resolve, fail) => { reject.push(fail); }));
+  h.request(1, [3], false); assert.equal(h.audio.starts, 0);
+  h.request(1, [3], true); assert.equal(h.audio.starts, 1);
+  h.request(1, [3], true); assert.equal(h.audio.starts, 1);
+  h.request(2, [9], true, { partKey: 'old' }); assert.equal(h.audio.starts, 1);
+  h.request(2, [9], true, { audioUrl: 'old.mp3' }); assert.equal(h.audio.starts, 1);
+  h.request(3, [9], true); assert.equal(h.audio.starts, 2);
+  reject[0](new Error('interrupted by newer seek')); await settleEditor();
+  assert.equal(h.ctx.ve.value, true);
+  h.ctx.wo(16); assert.equal(h.audio.paused, true);
+});
+
+function autoPlaybackRuntime() {
+  const timerSource = fs.readFileSync(path.join(root, 'assets/useExamTimerLifecycle-hzBFzOTc.js'), 'utf8');
+  const timer = vm.createContext({});
+  vm.runInContext(section(timerSource, 'function ye(e)', 'function vt(e)')
+    + section(timerSource, 'const ae=Object.freeze', 'const W=Object.freeze')
+    + 'globalThis.api={plan:Un,availability:Nt,state:xn,reduce:Ln,status:C,action:D,kinds:ae};', timer);
+  const listening = fs.readFileSync(path.join(root, 'assets/ListeningExamPage-Cf0rTFNO.js'), 'utf8');
+  const player = vm.createContext({ mt: timer.api.kinds, sn: 6, Ut: timer.api.state, dn: timer.api.reduce,
+    xe: timer.api.status, Oe: timer.api.action });
+  vm.runInContext(section(listening, 'function el(n=', 'const R=Object.freeze'), player);
+  return { timer: timer.api, player };
+}
+const autoParts = () => [4, 2, 1, 3].map(n => ({ partId: `edited-${n}`, partNumber: n,
+  label: `Part ${n}`, audioUrl: `audio-${n}.mp3` }));
+
+test('mixed listening offers four-Part automatic playback without guidance and keeps configured guidance optional', () => {
+  const { timer } = autoPlaybackRuntime();
+  for (const guidanceBoundaryEnabled of [false, true]) {
+    const plan = timer.plan({ isMixedListening: true, guidanceBoundaryEnabled, parts: autoParts() });
+    assert.equal(plan.ready, true);
+    assert.equal(timer.availability(plan).selectable, true);
+    assert.deepEqual(Array.from(plan.steps, step => step.partNumber), [1, 2, 3, 4]);
+    assert.deepEqual(Array.from(plan.steps, step => step.index), [0, 1, 2, 3]);
+    assert.deepEqual(Array.from(plan.requiredUrls), [1, 2, 3, 4].map(n => `audio-${n}.mp3`));
+  }
+  const guided = timer.plan({ isMixedListening: true, guidanceBoundaryEnabled: true,
+    unitIntro: { audioUrl: 'intro.mp3' }, unitOutro: { audioUrl: 'outro.mp3' }, parts: autoParts() });
+  assert.deepEqual(Array.from(guided.steps, step => step.audioUrl), ['intro.mp3', ...[1, 2, 3, 4].map(n => `audio-${n}.mp3`), 'outro.mp3']);
+});
+
+test('incomplete or invalid mixed audio remains disabled instead of skipping a missing Part', () => {
+  const { timer } = autoPlaybackRuntime();
+  const missing = autoParts(); missing[2].audioUrl = '';
+  const duplicate = autoParts(); duplicate[1].partId = duplicate[0].partId;
+  for (const parts of [autoParts().slice(0, 3), missing, duplicate]) {
+    const plan = timer.plan({ isMixedListening: true, guidanceBoundaryEnabled: false, parts });
+    assert.equal(plan.ready, false);
+    assert.equal(timer.availability(plan).selectable, false);
+    assert.equal(timer.availability(plan).rendered, true);
+    assert.equal(plan.steps.length, 0);
+  }
+});
+
+test('mixed auto playback follows selected Part identities, rejects stale endings, and prompts exactly once at the end', () => {
+  const { timer, player } = autoPlaybackRuntime();
+  const plan = timer.plan({ isMixedListening: true, guidanceBoundaryEnabled: false, parts: autoParts() });
+  const items = player.tl(plan.steps), played = [];
+  let terminal = 0, failure = 0;
+  const run = player.nl({ playStep(index) { played.push(player.al(items, index)); },
+    requestTerminalDecision() { terminal++; }, fail() { failure++; } });
+  run.start(plan.steps.length); const generation = run.generation;
+  run.handleStepEnded(0, generation - 1);
+  assert.deepEqual(played, ['edited-1']);
+  for (let index = 0; index < 4; index++) {
+    run.handleStepEnded(index, generation);
+    run.handleStepEnded(index, generation);
+  }
+  assert.deepEqual(played, [1, 2, 3, 4].map(n => `edited-${n}`));
+  assert.equal(terminal, 1); assert.equal(failure, 0);
+  run.start(4); const newGeneration = run.generation;
+  run.handleStepEnded(3, generation);
+  assert.equal(run.currentIndex, 0);
+  run.handleStepError(0, newGeneration, 'play_rejected');
+  assert.equal(run.status, 'failed'); assert.equal(failure, 1);
+  run.handleStepEnded(0, newGeneration); assert.equal(terminal, 1);
+  run.invalidate(); run.handleStepEnded(0, newGeneration);
+  assert.equal(run.status, 'invalidated');
+});
+
+test('auto playback waits for exam start and audio readiness and never restarts the same setup automatically', () => {
+  const { player } = autoPlaybackRuntime();
+  const ready = { dataLoaded: true, hasStarted: true, isAutoMode: true, planReady: true,
+    preloadReady: true, runActive: false, setupEpoch: 1, startedEpoch: -1, runStatus: 'idle' };
+  assert.equal(player.el(ready), true);
+  for (const change of [{ hasStarted: false }, { preloadReady: false }, { isAutoMode: false },
+    { planReady: false }, { runActive: true }, { startedEpoch: 1 }, { runStatus: 'failed' }, { runStatus: 'ended' }]) {
+    assert.equal(player.el({ ...ready, ...change }), false);
+  }
+});
 
 test('a disposed picker response cannot replace the newly selected channel', async () => {
   const replies = {};
