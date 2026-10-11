@@ -35,7 +35,7 @@
       return { albumId: 'web-public-' + channel, channel: channel,
         title: '公开题库热度 Top 50',
         subtitle: '公开题库近7天考情次数排序 · 同次数按题目ID排序 · 无历史排名变化',
-        tagText: '公开榜单', groupId: 'web_public', groupCode: 'web_public',
+        tagText: channel === 'reading' ? '阅读公开榜' : '听力公开榜', groupId: 'web_public', groupCode: 'web_public',
         groupTitle: '公开题库热度', groupDisplayOrder: 5, displayOrder: index,
         publicRowLimit: 50, maxDisplayRows: 50, mixedPracticeVisible: true,
         slots: slots };
