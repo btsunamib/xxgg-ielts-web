@@ -17,7 +17,7 @@
 
   var cfg = window.__XXGG_WEB_CONFIG__ || {};
   var APP_NAME = cfg.appName || '罗学弟考雅机考平台';
-  var APP_VERSION = cfg.appVersion || '0.9.16-rc.3';
+  var APP_VERSION = cfg.appVersion || '0.9.17-rc.2';
 
   /* --------------------------------------------------------------
    * 跨域媒体回源：原应用会 fetch() 预加载 CDN 上的音频。

@@ -35,6 +35,7 @@
       ".mix-modal .mix-result-list .mix-result-row{grid-template-columns:auto minmax(0,1fr) auto auto;column-gap:8px}" +
       ".mix-modal .mix-result-row .mix-result-summary-edit{border:1px solid var(--border,#e0e0e0);border-radius:6px;padding:5px 8px;margin:0;color:var(--accent,#3a6ea8);white-space:nowrap}" +
       ".mix-modal .mix-section .mix-seg-btn{display:flex;align-items:center;justify-content:center;white-space:nowrap}.mix-modal .mix-section.xxgg-compose-editor{font-size:13px;color:var(--color-text-primary,#232427);display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.1fr);column-gap:16px;align-items:start}" +
+      ".ielts-mix .xxgg-web-mix-tools{display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap}.ielts-mix .xxgg-web-part-editor{display:block;min-width:0}.ielts-mix .xxgg-ce-list{max-height:220px}.ielts-mix .xxgg-ce-actions{position:static}.ielts-mix .xxgg-ce-row{flex-wrap:wrap}" +
       ".xxgg-compose-editor *{box-sizing:border-box}" +
       ".xxgg-compose-editor>.xxgg-ce-head,.xxgg-compose-editor>p,.xxgg-compose-editor>.xxgg-ce-actions{grid-column:1/-1}" +
       ".xxgg-ce-slots{min-width:0}.xxgg-ce-head,.xxgg-ce-row,.xxgg-ce-actions{display:flex;align-items:center;gap:10px}" +

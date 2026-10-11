@@ -7,12 +7,33 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
+const crypto = require('node:crypto');
 const root = path.resolve(__dirname, '..');
-const html = fs.readFileSync(path.join(root, 'index.html'), 'utf8');
+// Bundle variable names change with each upstream build. These scope-aware
+// aliases normalize names only; the SHA ensures tests always exercise the exact
+// shipped code, and all statements still come from the deployed bundles.
+const contracts = JSON.parse(fs.readFileSync(path.join(__dirname, 'bundle-contracts.json'), 'utf8'));
+const bundleCache = new Map();
+function readBundle(file, encoding = 'utf8') {
+  const raw = fs.existsSync(file) ? fs.readFileSync(file, encoding) : '';
+  const relative = path.relative(root, file);
+  const contract = Object.entries(contracts).find(([oldName, c]) => c.path === relative || relative === 'assets/' + oldName)?.[1];
+  if (!contract) return raw;
+  const actual = fs.readFileSync(path.join(root, contract.path), 'utf8');
+  assert.equal(crypto.createHash('sha256').update(actual).digest('hex'), contract.sha256, 'Refresh bundle aliases after modifying ' + contract.path);
+  if (bundleCache.has(contract.path)) return bundleCache.get(contract.path);
+  const pieces = []; let end = 0;
+  for (const [from, to, name] of contract.aliases) {
+    pieces.push(actual.slice(end, from), name); end = to;
+  }
+  pieces.push(actual.slice(end));
+  const source = pieces.join(''); bundleCache.set(contract.path, source); return source;
+}
+const html = readBundle(path.join(root, 'index.html'), 'utf8');
 const mainPath = html.match(/src="\.\/(assets\/index-[^"]+\.js)(?:\?[^"]*)?"/)[1];
-const main = fs.readFileSync(path.join(root, mainPath), 'utf8');
+const main = readBundle(path.join(root, mainPath), 'utf8');
 const reviewPath = main.match(/import\("\.\/(ExamReviewPage-[^"]+\.js)(?:\?[^"]*)?"\)/)[1];
-const reviewSource = fs.readFileSync(path.join(root, 'assets', reviewPath), 'utf8');
+const reviewSource = readBundle(path.join(root, 'assets', reviewPath), 'utf8');
 
 function section(source, start, end) {
   const from = source.indexOf(start);
@@ -55,8 +76,8 @@ function harness({ initial = {}, fetch = async () => ok({}), local = false, comp
     Y0: (_, options) => !!options.skipAuth, Q0: () => 'test-client', tg: async () => {},
     is: 'memory_link,spelling_recall',
   });
-  if (local) vm.runInContext(fs.readFileSync(path.join(root, 'xxgg-local-mode.js'), 'utf8'), ctx);
-  if (compose) vm.runInContext(fs.readFileSync(path.join(root, 'xxgg-server-compose.js'), 'utf8'), ctx);
+  if (local) vm.runInContext(readBundle(path.join(root, 'xxgg-local-mode.js'), 'utf8'), ctx);
+  if (compose) vm.runInContext(readBundle(path.join(root, 'xxgg-server-compose.js'), 'utf8'), ctx);
   const snippets = [
     section(main, 'class U0', 'const Gt=new U0'), 'const Gt=new U0;',
     section(main, 'class Z0', 'const cs=new Z0'),
@@ -73,7 +94,7 @@ function harness({ initial = {}, fetch = async () => ok({}), local = false, comp
 }
 const session = { token: 'account-token', user: JSON.stringify({ id: 'student-1' }) };
 function ordinaryExam(h, channel = 'listening') {
-  const source = fs.readFileSync(path.join(root, 'assets/examDataService-BtCJRleA.js'), 'utf8');
+  const source = readBundle(path.join(root, 'assets/examDataService-BtCJRleA.js'), 'utf8');
   Object.assign(h.ctx, { tt: 'https://api.test/api', We: h.api, Ae: h.auth, DOMException, oo: data => data, lt: value => String(value) === '1' ? 'listening' : value });
   vm.runInContext(section(source, 'function Kn(t)', 'class to{')
     + '\n' + section(source, 'class to{', 'const go=new to')
@@ -86,7 +107,7 @@ function submitState() {
 }
 
 function draftModule(h) {
-  const source = fs.readFileSync(path.join(root, 'assets/useExamTimerLifecycle-hzBFzOTc.js'), 'utf8');
+  const source = readBundle(path.join(root, 'assets/useExamTimerLifecycle-hzBFzOTc.js'), 'utf8');
   const listeners = new Map(), unmount = [];
   Object.assign(h.window, { addEventListener: (key, fn) => listeners.set(key, fn), removeEventListener() {} });
   Object.assign(h.ctx, { document: { addEventListener() {}, removeEventListener() {} },
@@ -539,7 +560,7 @@ test('saved answers stay visible when source exams are unavailable, and retry re
   assert.equal(cached.elapsedSeconds, 120);
   assert.equal(reviewState(cached).byPart['part-1'].answers['1'], 'answer-1');
   assert.equal(reviewState(cached).byPart['part-1'].answerResults['1'].rightAnswer, 'answer-1');
-  const service = fs.readFileSync(path.join(root, 'assets/examDataService-BtCJRleA.js'), 'utf8');
+  const service = readBundle(path.join(root, 'assets/examDataService-BtCJRleA.js'), 'utf8');
   const runtime = vm.createContext({ tt: 'https://api.test/api', oo: value => value, console: { log() {} } });
   vm.runInContext(section(service, 'class to{', 'const go=new to') + '\nglobalThis.exam=new to;', runtime);
   runtime.exam.setRuntimeData(cached, compositionId);
@@ -837,7 +858,7 @@ test('a session renewal cannot clear or overwrite a login made while it was in f
 
 test('grading requires the complete answer and accepts every declared alternative', () => {
   for (const file of ['xxgg-server-compose.js', 'xxgg-local-mode.js']) {
-    const source = fs.readFileSync(path.join(root, file), 'utf8');
+    const source = readBundle(path.join(root, file), 'utf8');
     const ctx = vm.createContext({ str: v => v == null ? '' : String(v) });
     vm.runInContext(section(source, '  function normalizeAnswer(v)', '  function qNumberOf(q)')
       + '\nglobalThis.match=answersMatch;', ctx);
@@ -962,7 +983,7 @@ test('a failed catalogue request can recover without reloading the application',
 });
 
 test('empty timer fields do not erase the recorded elapsed duration', () => {
-  const source = fs.readFileSync(path.join(root, 'xxgg-server-compose.js'), 'utf8');
+  const source = readBundle(path.join(root, 'xxgg-server-compose.js'), 'utf8');
   const ctx = vm.createContext({ str: v => v == null ? '' : String(v), isPlainObject: v => !!v && typeof v === 'object', num: (v,d) => Number.isFinite(Number(v)) ? Number(v) : d });
   vm.runInContext(section(source, '  function elapsedFromTimer(', '  /* ------------------------------------------------------------------ */\n  /* 5. review') + '\nglobalThis.elapsed=elapsedFromTimer;', ctx);
   assert.equal(ctx.elapsed({ elapsedSeconds: null, elapsed: '', durationSeconds: 120 }, { elapsedSeconds: 60 }), 120);
@@ -1093,9 +1114,9 @@ function mixedController(h, authenticated = true) {
     Qn: async () => null, dt: {}, St: v => v, Su: () => false, p6: () => false,
     iw: 'mixed_practice', rw: 'high_frequency_more_rows',
     Bg: async ({ forceRefresh }) => forceRefresh(), Xt: v => v, rr: v => v,
-    S6: undefined,
+    S6: undefined, y: value => value && "value" in Object(value) ? value.value : value,
   });
-  vm.runInContext(section(main, 'function cu(', 'function cw(') + section(main, 'const Wa=Object.freeze', 'function yi()') +
+  vm.runInContext(section(main, 'function cu(', 'function cw(') + main.match(/function qaNew_Df_\d+\(e,t=\(\)=>!1\)\{[^}]+\}/)[0] + section(main, 'const Wa=Object.freeze', 'function yi()') +
     '\nglobalThis.controller=S6({isAuthenticated:{value:' + authenticated + '},router:{push:async value=>{globalThis.destination=value}}});', h.ctx);
   return h.ctx.controller;
 }
@@ -1132,7 +1153,7 @@ function editorRoot() {
 function pickerRuntime(listUnits, random = Math.random) {
   const window = { document: { getElementById: () => null, createElement: () => ({}), head: { appendChild() {} } },
     localStorage: storage(), __xxggServerCompose: { listUnits } };
-  vm.runInNewContext(fs.readFileSync(path.join(root, 'xxgg-compose-picker.js'), 'utf8'), { window, Math: Object.assign(Object.create(Math), { random }) });
+  vm.runInNewContext(readBundle(path.join(root, 'xxgg-compose-picker.js'), 'utf8'), { window, Math: Object.assign(Object.create(Math), { random }) });
   return window.__xxggComposePicker;
 }
 const settleEditor = () => new Promise(resolve => setImmediate(resolve));
@@ -1234,7 +1255,7 @@ test('only the latest question analysis may start audio and embedded timestamps 
   assert.deepEqual(embedded.emitted, [{ kind: 'play-question', indexes: [5] }]);
 });
 
-const textPanelSource = fs.readFileSync(path.join(root, 'assets/TextPanel-CrX6bIZB.js'), 'utf8');
+const textPanelSource = readBundle(path.join(root, 'assets/TextPanel-CrX6bIZB.js'), 'utf8');
 function questionAudioRuntime(play = () => Promise.resolve()) {
   const ref = value => ({ value });
   const audio = { currentTime: 0, paused: true, starts: 0,
@@ -1290,12 +1311,12 @@ test('question audio waits for readiness, ignores stale parts, and survives an o
 });
 
 function autoPlaybackRuntime() {
-  const timerSource = fs.readFileSync(path.join(root, 'assets/useExamTimerLifecycle-hzBFzOTc.js'), 'utf8');
+  const timerSource = readBundle(path.join(root, 'assets/useExamTimerLifecycle-hzBFzOTc.js'), 'utf8');
   const timer = vm.createContext({});
   vm.runInContext(section(timerSource, 'function ye(e)', 'function vt(e)')
     + section(timerSource, 'const ae=Object.freeze', 'const W=Object.freeze')
     + 'globalThis.api={plan:Un,availability:Nt,state:xn,reduce:Ln,status:C,action:D,kinds:ae};', timer);
-  const listening = fs.readFileSync(path.join(root, 'assets/ListeningExamPage-Cf0rTFNO.js'), 'utf8');
+  const listening = readBundle(path.join(root, 'assets/ListeningExamPage-Cf0rTFNO.js'), 'utf8');
   const player = vm.createContext({ mt: timer.api.kinds, sn: 6, Ut: timer.api.state, dn: timer.api.reduce,
     xe: timer.api.status, Oe: timer.api.action });
   vm.runInContext(section(listening, 'function el(n=', 'const R=Object.freeze'), player);
@@ -1410,6 +1431,19 @@ test('invalid drafts never create a paper or silently top up the requested selec
   }
 });
 
+for (const channel of ['reading', 'listening']) {
+  test('upstream manual composition uses the web adapter and preserves selected ' + channel + ' units', async () => {
+    const h = harness({ initial: session, compose: true, fetch: editorUpstream() });
+    const count = channel === 'listening' ? 4 : 3;
+    const ids = Array.from({ length: count }, (_, i) => `${channel}-${i + 1}-b`);
+    const paper = await h.api.composeManualMixedPractice({ channel, selections: ids.map(unitId => ({ unitId })) });
+    assert.deepEqual(Array.from(paper.slots, slot => slot.unitId), ids);
+    const exam = await h.api.getMixedPracticeExam(paper.compositionId);
+    assert.deepEqual(Array.from(exam.parts, part => part.originalUnitId), ids);
+    expectSession(h);
+  });
+}
+
 test('random compose ignores an old global custom override and can reshuffle', async () => {
   const initial = { ...session, 'xxgg.compose.custom.v1': JSON.stringify({ enabled: true, channel: 'listening',
     unitIds: ['listening-1-a', 'listening-2-a', 'listening-3-a', 'listening-4-a'] }) };
@@ -1497,32 +1531,36 @@ test('editor cancellation never applies selections and failed application retain
   assert.equal(editor.action('apply').disabled, false);
 });
 
-test('the shipped modal embeds custom choices and hides stale launch actions while editing', () => {
+test('the upstream sidebar preserves native modes, mounts web choices, and hides launch actions while editing', () => {
   const vnode = (tag, props, children) => ({ tag, props: props || {}, children });
-  const ctx = vm.createContext({ L: getter => ({ get value() { return getter(); } }), o: vnode, g: vnode, h() {},
-    pe: 'fragment', re: v => v, Be: (rows, callback) => rows.map(callback), K: () => null,
-    I: String, Ze: value => value, He: () => [], ke: value => value, ht: value => value });
-  const modal = section(main, 'HN={class:"pack-modal mix-modal"', 'HO=Object.freeze').replace(/,$/, ';');
-  vm.runInContext('const ' + modal + '\nglobalThis.modal=_O;', ctx);
-  const props = { mixModalOpen: true, mixPhase: 'config', mixKind: 'reading', mixSelectionMode: 'custom',
-    mixEditorSlot: -1, mixItems: [], mixDifficultyStops: [{ v: 'random', label: '随机' }], mixDifficultyIndex: 0,
-    setMixSelectionMode() {}, editMixSlot() {}, mountMixEditor() {}, unmountMixEditor() {}, mixPermBannerVisible: false };
+  const ctx = vm.createContext({ I: getter => ({ get value() { return getter(); } }), r: vnode, g: vnode,
+    f() {}, pr: 'transition', be: 'fragment', je: (rows, callback) => rows.map(callback), q: () => null,
+    dt: (tag, props, slots) => vnode(tag, props, typeof slots.default === 'function' ? slots.default() : slots),
+    Ii: callback => callback, y: value => value && 'value' in Object(value) ? value.value : value,
+    x: String, se: value => value, Ce: value => value, ot: value => value });
+  const actual = fs.readFileSync(path.join(root, mainPath), 'utf8');
+  const modal = section(actual, 'HN={key:0,class:"ielts-mix"', 'r4=xt').replace(/,$/, ';');
+  vm.runInContext('const ' + modal + '\nglobalThis.modal=s4;', ctx);
+  const props = { mixModalOpen: true, mixMode: 'random', mixPhase: 'config', mixKind: 'reading',
+    mixSelectionMode: 'random', mixEditorSlot: -1, mixItems: [], mixSlotItems: [],
+    mixDifficultyStops: [{ v: 'random', label: '随机' }], mixDifficultyIndex: 0,
+    setMixSelectionMode() {}, editMixSlot() {}, mountMixEditor() {}, unmountMixEditor() {},
+    mixPermBannerVisible: false };
   const render = ctx.modal.setup(props);
   function nodes(tree) { return Array.isArray(tree) ? tree.flatMap(nodes) : tree && typeof tree === 'object' ? [tree, ...nodes(tree.children)] : []; }
   let rendered = nodes(render({}, []));
-  assert.ok(rendered.some(n => n.props['aria-label'] === '组卷方式'));
-  assert.ok(rendered.some(n => n.props.onVnodeMounted === props.mountMixEditor));
-  assert.ok(!rendered.some(n => n.props.role === 'switch'));
-  assert.ok(!rendered.some(n => n.props.class === 'pack-modal-ft mix-modal-ft'));
-  props.mixPhase = 'result'; props.mixSelectionMode = 'random'; props.mixEditorSlot = 1;
-  props.mixItems = [1,2,3].map(i => ({ part: `P${i}`, partId: `p${i}`, en: `Title ${i}` }));
+  assert.ok(rendered.some(n => n.props.class === 'mix-pn-ft'));
+  props.mixSelectionMode = 'custom';
   rendered = nodes(render({}, []));
   assert.ok(rendered.some(n => n.props.onVnodeMounted === props.mountMixEditor));
-  assert.ok(!rendered.some(n => n.props.class === 'pack-modal-ft mix-modal-ft'));
+  assert.ok(!rendered.some(n => n.props.class === 'mix-pn-ft'));
+  props.mixPhase = 'result'; props.mixSelectionMode = 'random'; props.mixEditorSlot = 1;
+  rendered = nodes(render({}, []));
+  assert.ok(rendered.some(n => n.props.onVnodeMounted === props.mountMixEditor));
+  assert.ok(!rendered.some(n => n.props.class === 'mix-pn-ft'));
   props.mixEditorSlot = -1;
   rendered = nodes(render({}, []));
-  assert.equal(rendered.filter(n => /^替换 P\d 篇目$/.test(n.props['aria-label'] || '')).length, 3);
-  assert.ok(rendered.some(n => n.props.class === 'pack-modal-ft mix-modal-ft'));
+  assert.ok(rendered.some(n => n.props.class === 'mix-pn-ft'));
 });
 
 test('quota errors never evict the paper currently being answered (local-mix-33)', async () => {
