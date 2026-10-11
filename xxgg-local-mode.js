@@ -879,12 +879,14 @@
   var examCache = {};            // unitId -> exam payload
   var requiredPartsCache = {};   // unitId -> required parts list
   var unitsCache = {};           // channel -> units list
+  var unitsCacheAt = {};
   var compositionExamCache = {}; // compositionId -> merged exam payload
 
   function clearCaches() {
     examCache = {};
     requiredPartsCache = {};
     unitsCache = {};
+    unitsCacheAt = {};
     compositionExamCache = {};
   }
 
@@ -909,9 +911,10 @@
 
   function loadUnits(channel) {
     var key = str(channel);
-    if (unitsCache[key]) return Promise.resolve(unitsCache[key]);
+    if (unitsCache[key] && Date.now() - (unitsCacheAt[key] || 0) < 300000) return Promise.resolve(unitsCache[key]);
     var albumsUrl = apiBase() + '/practice/v1/albums';
     return fetchJsonWithTimeout(albumsUrl, UPSTREAM_TIMEOUT_MS).then(function (payload) {
+      if (!payload || String(payload.code) !== '200') throw new Error('CATALOGUE_UNAVAILABLE');
       var albums = extractList(unwrap(payload));
       var ids = [];
       for (var i = 0; i < albums.length; i++) {
@@ -922,8 +925,9 @@
       return Promise.all(ids.map(function (aid) {
         var u = apiBase() + '/practice/v1/albums/' + encodeURIComponent(aid) + '/units';
         return fetchJsonWithTimeout(u, UPSTREAM_TIMEOUT_MS).then(function (p2) {
+          if (!p2 || String(p2.code) !== '200') throw new Error('CATALOGUE_UNAVAILABLE');
           return extractList(unwrap(p2));
-        }, function () { return []; });
+        });
       }));
     }).then(function (lists) {
       var out = [];
@@ -931,33 +935,17 @@
       for (var li = 0; li < lists.length; li++) {
         var list = isArray(lists[li]) ? lists[li] : [];
         for (var i = 0; i < list.length; i++) {
-          var u = isPlainObject(list[i]) ? list[i] : {};
-          var id = str(u.id !== undefined && u.id !== null ? u.id : u.unitId);
-          if (!id || seen[id]) continue;
-          var ch = normalizeChannel(u.channel);
-          if (ch && ch !== key) continue;
-          var pn = str(u.partNo !== undefined && u.partNo !== null ? u.partNo : '');
-          if (!pn && isArray(u.parts) && u.parts.length) pn = str(u.parts[0].partNo || '');
-          seen[id] = 1;
-          out.push({
-            id: id,
-            unitId: id,
-            title: u.title,
-            titleEn: u.titleEn,
-            titleZh: u.titleZh,
-            channel: ch || key,
-            partNo: pn || '',
-            partRank: partRankOf(pn)
-          });
-          if (out.length >= 400) break;
+          var unit = W.__xxggComposeRules.candidate(list[i] || {}, key);
+          if (!unit || seen[unit.unitId]) continue;
+          seen[unit.unitId] = 1; out.push(unit);
         }
       }
-      if (out.length) unitsCache[key] = out;
+      if (out.length) { unitsCache[key] = out; unitsCacheAt[key] = Date.now(); }
       else delete unitsCache[key];
       return out;
-    }, function () {
+    }, function (error) {
       delete unitsCache[key];
-      return [];
+      throw error;
     });
   }
 
@@ -1974,23 +1962,6 @@ function codeByPartFor(unitId) {
     return channel === 'listening' ? 4 : 3;
   }
 
-  function explicitPick(pool, body, need) {
-    var ids = asArray(body.selectedUnitIds);
-    if (ids.length !== need) return null;
-    var chosen = [], used = {}, parts = {};
-    for (var i = 0; i < ids.length; i++) {
-      var id = str(ids[i]);
-      var unit = null;
-      for (var j = 0; j < pool.length; j++) if (pool[j].unitId === id) { unit = pool[j]; break; }
-      if (!unit || used[id] || unit.partRank < 1 || unit.partRank > need || parts[unit.partRank]) return null;
-      used[id] = 1;
-      parts[unit.partRank] = 1;
-      chosen.push(unit);
-    }
-    chosen.sort(function (x, y) { return x.partRank - y.partRank; });
-    return chosen;
-  }
-
   function handleCompose(ctx) {
     return ctx.body().then(function (body) {
       var b = isPlainObject(body) ? body : {};
@@ -2002,7 +1973,6 @@ function codeByPartFor(unitId) {
         : (str(b.difficulty || 'random') || 'random');
       var onlyUndone = b.onlyUndone === true;
       var seed = str(b.seed === undefined || b.seed === null ? '' : b.seed);
-      var shortageFallbackConfirmed = b.shortageFallbackConfirmed === true;
       var prevId = str(b.previousCompositionId || '');
 
       // `excludePartIds` is a string[] on the wire (never a "a|b" string).
@@ -2025,91 +1995,21 @@ function codeByPartFor(unitId) {
       var need = slotCountFor(channel);
 
       return loadUnits(channel).then(function (units) {
-        var pool = [];
-        for (i = 0; i < units.length; i++) {
-          var u = isPlainObject(units[i]) ? units[i] : {};
-          var id = str(u.id !== undefined && u.id !== null ? u.id : u.unitId);
-          if (!id) continue;
-          var titleEn = str(
-            u.titleEn !== undefined && u.titleEn !== null ? u.titleEn :
-              (u.title !== undefined && u.title !== null ? u.title :
-                (u.subtitle !== undefined && u.subtitle !== null ? u.subtitle : id))
-          );
-          var titleZh = u.titleZh === null || u.titleZh === undefined ? null : str(u.titleZh);
-                    var avgRaw = u.avgAccuracy !== undefined && u.avgAccuracy !== null ? u.avgAccuracy : u.avgAcc;
-          var pn = str(u.partNo !== undefined && u.partNo !== null ? u.partNo : '');
-          if (!pn && isArray(u.parts) && u.parts.length) pn = str(u.parts[0].partNo || '');
-          pool.push({
-            unitId: id,
-            titleEn: titleEn,
-            titleZh: titleZh,
-            avgPct: pctOfEither(avgRaw === undefined || avgRaw === null ? 0.5 : avgRaw),
-            channel: normalizeChannel(u.channel) || channel,
-            partNo: pn || '',
-            partRank: partRankOf(pn)
-          });
-        }
-
-        function notExcluded(c) { return !exclude[c.unitId]; }
-        var primary = pool.filter(function (c) {
-          return notExcluded(c) && !(onlyUndone && isUnitDone(c.unitId));
+        var pool = units.map(function (u) {
+          return Object.assign({}, u, { done: isUnitDone(u.unitId) });
         });
-        var secondary = pool.filter(notExcluded);
-
-        var rnd = makeRng(hash32(seed + '|' + channel + '|' + difficulty + '|' + (onlyUndone ? '1' : '0') +
-          '|' + (preferHighFrequency ? '1' : '0')));
-                var warning = null;
-
-        // Group by IELTS Part and take exactly ONE passage per Part, so a paper
-        // can never contain e.g. three Part 3 passages.
-        var usable = primary.length ? primary : secondary;
-        if (!usable.length) usable = pool;
-        var byPart = {};
-        for (i = 0; i < usable.length; i++) {
-          var uu = usable[i];
-          var gk = uu.partNo ? str(uu.partNo) : ('Part ' + (uu.partRank || 99));
-          if (!byPart[gk]) byPart[gk] = { rank: uu.partRank || 99, items: [] };
-          byPart[gk].items.push(uu);
-        }
-        var gkeys = Object.keys(byPart);
-        gkeys.sort(function (x, y) { return byPart[x].rank - byPart[y].rank; });
-
-        var chosen = [];
-        for (i = 0; i < gkeys.length; i++) {
-          var grp = byPart[gkeys[i]];
-          var items = grp.items.slice();
-          shuffleInPlace(items, rnd);
-          if (preferHighFrequency) {
-            items.sort(function (x, y) { return (y.avgPct || 0) - (x.avgPct || 0); });
-          }
-          if (items.length) chosen.push(items[0]);
-        }
-
-        // Fewer distinct Parts than requested: top up rather than failing.
-        if (chosen.length < need) {
-          var usedIds = {};
-          for (i = 0; i < chosen.length; i++) usedIds[chosen[i].unitId] = 1;
-          var extra = secondary.slice();
-          if (!extra.length) extra = pool.slice();
-          shuffleInPlace(extra, rnd);
-          for (i = 0; i < extra.length && chosen.length < need; i++) {
-            if (usedIds[extra[i].unitId]) continue;
-            usedIds[extra[i].unitId] = 1;
-            chosen.push(extra[i]);
-            warning = warning || 'MIXED_PRACTICE_REPEAT_ALLOWED';
-          }
-        }
-
-        chosen.sort(function (x, y) { return (x.partRank || 99) - (y.partRank || 99); });
-        chosen = chosen.slice(0, need);
-
-
-        if (b.selectionMode === 'custom' || b.selectedUnitIds !== undefined) {
-          chosen = explicitPick(pool, b, need);
-          if (!chosen) return fail('MIXED_PRACTICE_SELECTION_INVALID', 400);
-        }
+        var rnd = makeRng(hash32(seed + '|' + channel + '|' + difficulty + '|' +
+          (onlyUndone ? '1' : '0') + '|' + (preferHighFrequency ? '1' : '0')));
+        var selection = W.__xxggComposeRules.choose(pool,
+          Object.assign({}, b, { channel: channel, excludePartIds: Object.keys(exclude) }), rnd);
+        if (selection.error) return jsonResponse({ code: selection.error,
+          msg: selection.error, data: selection.data || null }, 400);
+        var chosen = selection.chosen, warning = selection.warning;
+        var i;
 
         return Promise.all(chosen.map(function (c) { return ensureExam(c.unitId); })).then(function (exams) {
+          if (exams.some(function (exam) { return !exam || !isArray(exam.parts) || exam.parts.length !== 1; }))
+            return fail('MIXED_PRACTICE_EXAM_NOT_READY', 503);
                     var slots = [];
           for (i = 0; i < chosen.length; i++) {
             var c = chosen[i];
@@ -2162,7 +2062,7 @@ var seq = nextSeq();
             warningCode: warning
           });
         });
-      });
+      }).catch(function () { return fail('题库加载失败，请重试。', 503); });
     });
   }
 

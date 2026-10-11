@@ -76,6 +76,7 @@ function harness({ initial = {}, fetch = async () => ok({}), local = false, comp
     Y0: (_, options) => !!options.skipAuth, Q0: () => 'test-client', tg: async () => {},
     is: 'memory_link,spelling_recall',
   });
+  vm.runInContext(readBundle(path.join(root, 'xxgg-compose-rules.js'), 'utf8'), ctx);
   if (local) vm.runInContext(readBundle(path.join(root, 'xxgg-local-mode.js'), 'utf8'), ctx);
   if (compose) vm.runInContext(readBundle(path.join(root, 'xxgg-server-compose.js'), 'utf8'), ctx);
   const snippets = [
@@ -977,7 +978,7 @@ test('a failed catalogue request can recover without reloading the application',
     if (new URL(url).pathname.endsWith('/albums')) return ok([{ id: 'album-1' }]);
     return ok([{ id: 'unit-1', channel: 'listening', partNo: 'Part 1' }]);
   } });
-  assert.equal((await h.window.__xxggServerCompose.listUnits('listening')).length, 0);
+  await assert.rejects(() => h.window.__xxggServerCompose.listUnits('listening'), /CATALOGUE_UNAVAILABLE/);
   available = true;
   assert.equal((await h.window.__xxggServerCompose.listUnits('listening')).length, 1);
 });
@@ -1666,4 +1667,102 @@ test('real ranking entitlement survives the browser composition bridge', async (
     assert.equal(body.data.entitlements.high_frequency_more_rows, enabled);
     assert.equal(body.data.features.find(f => f.featureCode === 'high_frequency_more_rows').enabled, enabled);
   }
+});
+
+function rulesUpstream(catalogue, { done = [], failStatus = false, failAlbum = false, seen = [] } = {}) {
+  return async (url) => {
+    const u = new URL(url), p = u.pathname;
+    if (p.endsWith('/albums')) return ok([{ id: 'rules-album' }]);
+    if (p.endsWith('/units')) return failAlbum ? json({ code: '503' },503) : ok(catalogue);
+    if (p.endsWith('/unit-status')) {
+      const ids = u.searchParams.get('unitIds').split(','); seen.push(...ids);
+      return failStatus ? json({ code:'503' },503) : ok({ list: ids.map(unitId => ({ unitId,
+        progressStatus: done.includes(unitId) ? 'done' : 'todo' })) });
+    }
+    if (p.endsWith('/exam')) return ok({ parts: [unitPart(1)] });
+    return ok({});
+  };
+}
+function rulesCatalog(channel = 'reading') {
+  return Array.from({length:channel==='reading'?3:4}, (_,i) => ['easy','medium','hard'].map((d,j)=>({
+    id:`${d}-${i+1}`, channel, partNo:`Part ${i+1}`, averageAccuracy:[80,60,30][j],
+    sevenDayReportTotal:[1,2,100][j], entryMode:'exam', mixedSelectable:true
+  }))).flat();
+}
+for (const local of [false,true]) {
+  for (const channel of ['reading','listening']) {
+    test(`${local?'local':'account'} ${channel} uses real difficulty and heat metadata with valid slots`, async () => {
+      const h = harness({ initial:local?{}:session, local, compose:!local, fetch:rulesUpstream(rulesCatalog(channel)) });
+      for (const difficulty of ['easy','medium','hard']) {
+        const c = await h.api.composeMixedPractice({channel,difficulty,selectionMode:'random',seed:'rules'});
+        assert.deepEqual(c.slots.map(s=>s.unitId),Array.from({length:channel==='reading'?3:4},(_,i)=>`${difficulty}-${i+1}`));
+      }
+      const hot = await h.api.composeMixedPractice({channel,preferHighFrequency:true,selectionMode:'random',seed:'rules'});
+      assert.ok(hot.slots.every(s=>s.unitId.startsWith('hard-')));
+    });
+  }
+  test(`${local?'local':'account'} missing Part fails without creating a stored paper`, async () => {
+    const h = harness({ initial:local?{}:session, local, compose:!local,
+      fetch:rulesUpstream(rulesCatalog().filter(u=>u.partNo!=='Part 2')) });
+    await assert.rejects(()=>h.api.composeMixedPractice({channel:'reading',selectionMode:'random'}),e=>
+      e.businessData.shortagePartNos.join(',')==='2' && e.businessData.fallbackAvailable===false);
+    const store = local?h.window.__xxggLocalMode.store: h.window.__xxggServerCompose.store();
+    assert.equal(Object.keys(store.compositions).length,0);
+  });
+}
+test('account only-undone covers all candidates beyond 300 and catalogue entries beyond 400', async () => {
+  const catalogue = Array.from({length:405},(_,i)=>({id:`p1-${i}`,channel:'reading',partNo:'Part 1',averageAccuracy:80}));
+  catalogue.push({id:'late2',channel:'reading',partNo:'Part 2',averageAccuracy:80},
+    {id:'late3',channel:'reading',partNo:'Part 3',averageAccuracy:80});
+  const seen = [];
+  const h = harness({initial:session,compose:true,fetch:rulesUpstream(catalogue,{done:['late2'],seen})});
+  await assert.rejects(()=>h.api.composeMixedPractice({channel:'reading',onlyUndone:true,difficulty:'easy'}),e=>
+    e.businessData.shortagePartNos.join(',')==='2' && e.businessData.fallbackAvailable===true);
+  assert.equal(new Set(seen).size,407);
+  const c = await h.api.composeMixedPractice({channel:'reading',onlyUndone:true,difficulty:'easy',shortageFallbackConfirmed:true});
+  assert.deepEqual(c.slots.map(s=>s.partNo),['Part 1','Part 2','Part 3']);
+});
+test('failed account status read never silently includes completed candidates', async () => {
+  const h = harness({initial:session,compose:true,fetch:rulesUpstream(rulesCatalog(),{failStatus:true})});
+  await assert.rejects(()=>h.api.composeMixedPractice({channel:'reading',onlyUndone:true}),e=>e.status===503);
+  assert.equal(Object.keys(h.window.__xxggServerCompose.store().compositions).length,0);
+});
+test('catalogue source failure in both modes creates no partial paper', async () => {
+  for (const local of [false,true]) {
+    const h = harness({initial:local?{}:session,local,compose:!local,fetch:rulesUpstream(rulesCatalog(),{failAlbum:true})});
+    await assert.rejects(()=>h.api.composeMixedPractice({channel:'reading'}),e=>e.status===503);
+  }
+});
+test('switching accounts refreshes status and does not inherit another owners completed markers', async () => {
+  const initial = {...session,'xxgg.servercompose.v1':JSON.stringify({compositions:{},doneUnits:{'easy-1':1},
+    doneUnitsByOwner:{'student-1':{'easy-1':1}}})};
+  const seen=[];
+  const h=harness({initial,compose:true,fetch:rulesUpstream(rulesCatalog(),{seen})});
+  await assert.rejects(()=>h.api.composeMixedPractice({channel:'reading',difficulty:'easy',onlyUndone:true}),e=>e.status===400);
+  const previous=seen.length;
+  h.localStorage.setItem('token','other-account');h.localStorage.setItem('user',JSON.stringify({id:'student-2'}));
+  const c=await h.api.composeMixedPractice({channel:'reading',difficulty:'easy',onlyUndone:true});
+  assert.equal(c.slots[0].unitId,'easy-1');assert.ok(seen.length>previous);
+});
+
+test('ordinary submission invalidates only-undone status and catalogue caches immediately', async () => {
+  let done=false, reads=0;
+  const source=rulesUpstream(rulesCatalog());
+  const h=harness({initial:session,compose:true,fetch:async (url,init)=>{
+    const p=new URL(url).pathname;
+    if(p.endsWith('/practice/v1/attempts')){done=true;return ok({resultId:'ordinary-result'});}
+    if(p.endsWith('/unit-status')){reads++; return rulesUpstream(rulesCatalog(),{done:done?['easy-1']:[]})(url,init);}
+    return source(url,init);
+  }});
+  await h.api.composeMixedPractice({channel:'reading',onlyUndone:true,difficulty:'easy'});
+  const before=reads;
+  await h.window.fetch('https://api.test/api/practice/v1/attempts',{method:'POST',body:'{}'});
+  await assert.rejects(()=>h.api.composeMixedPractice({channel:'reading',onlyUndone:true,difficulty:'easy'}),e=>e.status===400);
+  assert.ok(reads>before);
+});
+test('manual selection does not depend on random difficulty or a status-service response', async () => {
+  const h=harness({initial:session,compose:true,fetch:rulesUpstream(rulesCatalog(),{failStatus:true})});
+  const c=await h.api.composeMixedPractice({channel:'reading',selectionMode:'custom',
+    selectedUnitIds:['easy-3','easy-1','easy-2'],onlyUndone:true,difficulty:'hard'});
+  assert.deepEqual(c.slots.map(s=>s.unitId),['easy-1','easy-2','easy-3']);
 });
