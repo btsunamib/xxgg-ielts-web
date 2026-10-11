@@ -20,3 +20,13 @@ Run `node --test tests/listening-compose.test.cjs`. The tests execute shipped re
 `tests/bundle-contracts.json` maps changing build variable names to the test harness names, validates each shipped file with SHA-256, and changes identifier spelling only. Scope resolution was verified against the shipped modules. Refresh its ranges and hashes whenever a renderer bundle changes; do not bypass the digest check.
 
 Server-backed vocabulary, account, and catalogue features continue to use the upstream API and its availability and permissions.
+
+## Public catalogue heat list (2026-10-11)
+
+The web port adds independent “公开题库热度 Top 50” albums for reading and listening. Each Part shows up to 50 unique public catalogue entries, sorted by the public `sevenDayReportTotal` field descending, with unit ID ascending as the deterministic tie break. Source album IDs and entry modes are preserved. These are independently computed catalogue lists, not copies of the official permission-gated extended ranking; historical positions/deltas are unavailable. Public catalogue coverage can differ from the official ranking universe.
+
+Only ordinary public albums/units are requested for this list, without account headers or cookies. Public metadata stays in memory for five minutes; no privileged account data is cached or shared. If a catalogue source fails, the official list remains intact and the next load retries. All 50 rows are delivered together, so no ranking entitlement is required for this independent list.
+
+The former forced `high_frequency_more_rows` flag is removed. Real accounts retain the upstream ranking entitlement through the local composition adapter; official rankings and their pagination remain upstream-controlled. Anonymous/local accounts keep the original public official ranking view.
+
+Run `node --test tests/*.test.cjs` for 90 regression checks, including Top 50 sorting, deduplication, Part/channel separation, public-request credential isolation, failure fallback, and preservation of paid/unpaid ranking feature flags with mocked accounts. Real privileged-account validation requires secure sign-in and is separate from these checks.
