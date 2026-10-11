@@ -532,6 +532,30 @@
   var MORE_ROWS_UNLOCK = false;
   var ROWS_DIAG = false;
 
+  function explainComposeRules() {
+    var body = D.querySelector('.mix-modal .mix-modal-bd');
+    if (!body) return;
+    if (!body.querySelector('.xxgg-compose-rules-note')) {
+      var note = D.createElement('p');
+      note.className = 'xxgg-compose-rules-note';
+      note.style.cssText = 'font-size:12px;line-height:1.6;opacity:.8;margin:0 0 12px';
+      note.textContent = '网页随机组卷：高频优先按近7天考情次数加权选题；难度按各Part平均正确率排序分为较高、中间、较低三档（简单、中等、难）。每个Part一篇，缺题时不会用其他Part凑数。';
+      body.insertBefore(note, body.firstChild);
+    }
+    var paragraphs = body.querySelectorAll('p');
+    for (var i = 0; i < paragraphs.length; i++) {
+      var text = paragraphs[i].textContent;
+      var original = 'hard 会偏向你个人正确率更低的已做题，easy / medium / random 也会按对应难度规则匹配。';
+      if (text.indexOf(original) >= 0) paragraphs[i].textContent = text.replace(original,
+        '网页端按各Part平均正确率的高、中、低三档匹配已做题；随机难度不限制正确率。');
+    }
+  }
+  try {
+    var rulesObserver = new W.MutationObserver(explainComposeRules);
+    rulesObserver.observe(D.documentElement, { childList: true, subtree: true });
+  } catch (e) { }
+  D.addEventListener('DOMContentLoaded', explainComposeRules);
+
   /* ------------------------------------------------------------------ */
   /* Listening compose: the audio preload overlay must not eat the click  */
   /*                                                                     */

@@ -66,9 +66,7 @@
 
   var SLOTS_READING = 3;
   var SLOTS_LISTENING = 4;
-  var MAX_POOL = 400;
   var UNIT_STATUS_CHUNK = 50;
-  var UNIT_STATUS_MAX_IDS = 300;
   var UNIT_STATUS_TTL_MS = 120000;
   var UPSTREAM_TIMEOUT_MS = 60000;
   var UNIT_STATUS_TIMEOUT_MS = 15000;
@@ -385,7 +383,7 @@
   /* Storage: composed papers                                            */
   /* ------------------------------------------------------------------ */
   function blankComposeStore() {
-    return { version: 1, seq: 0, compositions: {}, doneUnits: {} };
+    return { version: 1, seq: 0, compositions: {}, doneUnits: {}, doneUnitsByOwner: {} };
   }
 
   function blankAnswers() {
@@ -402,6 +400,7 @@
     if (!isPlainObject(data)) return out;
     if (isPlainObject(data.compositions)) out.compositions = data.compositions;
     if (isPlainObject(data.doneUnits)) out.doneUnits = data.doneUnits;
+    if (isPlainObject(data.doneUnitsByOwner)) out.doneUnitsByOwner = data.doneUnitsByOwner;
     out.seq = num(data.seq, 0);
     return out;
   }
@@ -425,6 +424,12 @@
         if (!isPlainObject(current) || num(incoming && incoming.storageRevision, 0) > num(current.storageRevision, 0)) {
           composeStore.compositions[ids[i]] = incoming;
         }
+      }
+      var owners = Object.keys(saved.doneUnitsByOwner || {});
+      for (var oi = 0; oi < owners.length; oi++) {
+        var key = owners[oi];
+        composeStore.doneUnitsByOwner[key] = Object.assign({},
+          composeStore.doneUnitsByOwner[key], saved.doneUnitsByOwner[key]);
       }
       var units = Object.keys(saved.doneUnits);
       for (var j = 0; j < units.length; j++) if (saved.doneUnits[units[j]] === 1) composeStore.doneUnits[units[j]] = 1;
@@ -467,7 +472,7 @@
       version: store.version,
       seq: store.seq,
       compositions: {},
-      doneUnits: store.doneUnits
+      doneUnits: store.doneUnits, doneUnitsByOwner: store.doneUnitsByOwner
     };
     var src = isPlainObject(store.compositions) ? store.compositions : {};
     var ids = Object.keys(src);
@@ -802,11 +807,24 @@
   /* Caches                                                              */
   /* ------------------------------------------------------------------ */
   var unitsCache = {};           // channel -> Promise<unit[]>
+  var unitsCacheAt = {};
   var unitExamCache = {};        // unitId -> exam payload
-  var unitStatusCache = {};      // channel -> {at, map}
+  var unitStatusCache = {};      // channel -> {at, map, ids}
+  var catalogueIdentity = '';
+  function ownerKey() {
+    var user = safe(function () { return JSON.parse(lsGet(USER_KEY) || '{}'); }, {}) || {};
+    return str(user.id || user.userId || user.email || '');
+  }
+  function syncCatalogueIdentity() {
+    var current = readToken();
+    if (catalogueIdentity !== current) {
+      invalidateCaches(); catalogueIdentity = current;
+    }
+  }
 
   function invalidateCaches() {
     unitsCache = {};
+    unitsCacheAt = {};
     unitExamCache = {};
     unitStatusCache = {};
   }
@@ -821,14 +839,17 @@
   }
 
   function loadUnits(channel, refresh) {
+    syncCatalogueIdentity();
     var key = normalizeChannel(channel) || 'reading';
     if (refresh === true) delete unitsCache[key];
-    if (unitsCache[key]) return unitsCache[key];
+    if (unitsCache[key] && Date.now() - (unitsCacheAt[key] || 0) < 300000) return unitsCache[key];
+    unitsCacheAt[key] = Date.now();
 
     var albumsUrl = apiBase() + '/practice/v1/albums';
     unitsCache[key] = requestUpstream(albumsUrl, { method: 'GET' }, UPSTREAM_TIMEOUT_MS)
       .then(function (res) {
-        var albums = res && res.ok ? extractList(res.data) : [];
+        if (!res || !res.ok) throw new Error('CATALOGUE_UNAVAILABLE');
+        var albums = extractList(res.data);
         var ids = [];
         for (var i = 0; i < albums.length; i++) {
           var a = isPlainObject(albums[i]) ? albums[i] : {};
@@ -838,8 +859,10 @@
         return Promise.all(ids.map(function (aid) {
           var u = apiBase() + '/practice/v1/albums/' + encodeURIComponent(aid) + '/units';
           return requestUpstream(u, { method: 'GET' }, UPSTREAM_TIMEOUT_MS)
-            .then(function (r) { return r && r.ok ? extractList(r.data) : []; },
-                  function () { return []; });
+            .then(function (r) {
+              if (!r || !r.ok) throw new Error('CATALOGUE_UNAVAILABLE');
+              return extractList(r.data);
+            });
         }));
       })
       .then(function (lists) {
@@ -847,32 +870,15 @@
         var seen = {};
         for (var li = 0; li < lists.length; li++) {
           var list = lists[li] || [];
-          for (var i = 0; i < list.length && out.length < MAX_POOL; i++) {
-            var u = isPlainObject(list[i]) ? list[i] : {};
-            var id = str(u.id !== undefined && u.id !== null ? u.id : u.unitId);
-            if (!id || seen[id]) continue;
-            var ch = normalizeChannel(u.channel);
-            if (ch && ch !== key) continue;
-            var pn = str(u.partNo !== undefined && u.partNo !== null ? u.partNo : '');
-            if (!pn && Array.isArray(u.parts) && u.parts.length) {
-              pn = str(u.parts[0].partNo || '');
-            }
-            seen[id] = 1;
-            out.push({
-              unitId: id,
-              titleEn: str(u.titleEn !== undefined && u.titleEn !== null ? u.titleEn
-                : (u.title !== undefined && u.title !== null ? u.title
-                  : (u.subtitle !== undefined && u.subtitle !== null ? u.subtitle : id))),
-              titleZh: u.titleZh === null || u.titleZh === undefined ? '' : str(u.titleZh),
-              channel: ch || key,
-              partNo: pn || '',
-              partRank: partRank(pn)
-            });
+          for (var i = 0; i < list.length; i++) {
+            var unit = W.__xxggComposeRules.candidate(list[i] || {}, key);
+            if (!unit || seen[unit.unitId]) continue;
+            seen[unit.unitId] = 1; out.push(unit);
           }
         }
         if (!out.length) delete unitsCache[key];
         return out;
-      }, function () { delete unitsCache[key]; return []; });
+      }, function (error) { delete unitsCache[key]; throw error; });
 
     return unitsCache[key];
   }
@@ -891,11 +897,12 @@
 
   function fetchUnitStatus(channel, unitIds) {
     var key = normalizeChannel(channel) || 'reading';
+    var idsKey = asArray(unitIds).map(String).sort().join(',');
     var cached = unitStatusCache[key];
-    if (cached && (Date.now() - cached.at) < UNIT_STATUS_TTL_MS) {
+    if (cached && cached.ids === idsKey && (Date.now() - cached.at) < UNIT_STATUS_TTL_MS) {
       return Promise.resolve(cached.map);
     }
-    var ids = asArray(unitIds).slice(0, UNIT_STATUS_MAX_IDS);
+    var ids = asArray(unitIds);
     if (!ids.length) return Promise.resolve({});
 
     var chunks = [];
@@ -904,16 +911,18 @@
     }
 
     var map = {};
-    var chain = Promise.resolve();
-    for (var c = 0; c < chunks.length; c++) {
-      chain = chain.then((function (chunk) {
-        return function () {
+    var nextChunk = 0;
+    function worker() {
+      if (nextChunk >= chunks.length) return Promise.resolve();
+      var chunk = chunks[nextChunk++];
           var url = apiBase() + '/practice/v1/unit-status?unitIds=' +
             encodeURIComponent(chunk.join(','));
-          return requestUpstream(url, { method: 'GET' }, UNIT_STATUS_TIMEOUT_MS)
+      return requestUpstream(url, { method: 'GET' }, UNIT_STATUS_TIMEOUT_MS)
             .then(function (res) {
-              var d = res && res.ok ? res.data : null;
-              var list = isPlainObject(d) && isArray(d.list) ? d.list : [];
+              if (!res || !res.ok) throw new Error('UNIT_STATUS_UNAVAILABLE');
+              var d = res.data;
+              var list = isArray(d) ? d : isPlainObject(d) && isArray(d.list) ? d.list : null;
+              if (!list) throw new Error('UNIT_STATUS_UNAVAILABLE');
               for (var j = 0; j < list.length; j++) {
                 var e = isPlainObject(list[j]) ? list[j] : {};
                 var uid = str(e.unitId !== undefined && e.unitId !== null ? e.unitId : e.id);
@@ -925,23 +934,21 @@
                   resultId: e.resultId === null || e.resultId === undefined ? '' : str(e.resultId)
                 };
               }
-            }, function () { /* ignore chunk */ });
-        };
-      })(chunks[c]));
+            }).then(worker);
     }
+    var chain = Promise.all([worker(), worker(), worker()]);
 
     return chain.then(function () {
-      unitStatusCache[key] = { at: Date.now(), map: map };
+      unitStatusCache[key] = { at: Date.now(), map: map, ids: idsKey };
       return map;
-    }, function () {
-      unitStatusCache[key] = { at: Date.now(), map: map };
-      return map;
-    });
+    }, function (error) { delete unitStatusCache[key]; throw error; });
   }
 
   function isUnitDone(unitId, statusMap) {
     var id = str(unitId);
-    if (composeStore.doneUnits[id] === 1) return true;
+    var owner = ownerKey();
+    var done = composeStore.doneUnitsByOwner && composeStore.doneUnitsByOwner[owner];
+    if (owner && done && done[id] === 1) return true;
     var s = statusMap && statusMap[id];
     if (!s) return false;
     if (s.progressStatus === 'done') return true;
@@ -1106,69 +1113,16 @@
 
   // Returns the user's passages (Part-ordered, capped at `need`) or null when
   // there is no usable custom selection for this channel.
-  function customPick(pool, need, channel) {
-    var sel = readCustomSelection();
-    if (!sel || !sel.enabled || !sel.unitIds.length) return null;
-    if (sel.channel && sel.channel !== channel) return null;
-
-    var byId = {};
-    for (var i = 0; i < pool.length; i++) byId[str(pool[i].unitId)] = pool[i];
-
-    var picked = [];
-    var seen = {};
-    for (i = 0; i < sel.unitIds.length; i++) {
-      var id = str(sel.unitIds[i]);
-      if (!id || seen[id]) continue;
-      seen[id] = 1;
-      if (byId[id]) picked.push(byId[id]);
-    }
-    if (!picked.length) return null;
-
-    picked.sort(function (x, y) { return (x.partRank || 99) - (y.partRank || 99); });
-    picked = picked.slice(0, need);
-
-    // The user picked fewer passages than the paper needs: top up from the
-    // rest so the composed paper stays valid.
-    if (picked.length < need) {
-      for (i = 0; i < pool.length && picked.length < need; i++) {
-        var uid = str(pool[i].unitId);
-        if (seen[uid]) continue;
-        seen[uid] = 1;
-        picked.push(pool[i]);
-      }
-      picked.sort(function (x, y) { return (x.partRank || 99) - (y.partRank || 99); });
-    }
-    return picked;
-  }
-
-  // Explicit drafts are scoped to one request, never a global random override.
-  function explicitPick(pool, body, need) {
-    var ids = asArray(body.selectedUnitIds);
-    if (ids.length !== need) return null;
-    var chosen = [], used = {}, parts = {};
-    for (var i = 0; i < ids.length; i++) {
-      var id = str(ids[i]);
-      var unit = null;
-      for (var j = 0; j < pool.length; j++) if (pool[j].unitId === id) { unit = pool[j]; break; }
-      if (!unit || used[id] || unit.partRank < 1 || unit.partRank > need || parts[unit.partRank]) return null;
-      used[id] = 1;
-      parts[unit.partRank] = 1;
-      chosen.push(unit);
-    }
-    chosen.sort(function (x, y) { return x.partRank - y.partRank; });
-    return chosen;
-  }
-
   function handleCompose(ctx) {
     return readBody(ctx.input, ctx.init).then(function (body) {
       var b = isPlainObject(body) ? body : {};
+      var composeIdentity = readToken();
       var channel = normalizeChannel(b.channel) || 'reading';
       var preferHighFrequency = b.preferHighFrequency === true;
       // `preferHighFrequency` forces difficulty to "random" (literal client).
       var difficulty = preferHighFrequency ? 'random' : (str(b.difficulty || 'random') || 'random');
       var onlyUndone = b.onlyUndone === true;
       var seed = str(b.seed === undefined || b.seed === null ? '' : b.seed);
-      var shortageFallbackConfirmed = b.shortageFallbackConfirmed === true;
       var prevId = str(b.previousCompositionId || '');
 
       var exclude = {};
@@ -1195,107 +1149,25 @@
         var ids = [];
         for (i = 0; i < units.length; i++) ids.push(units[i].unitId);
 
-        var statusJob = onlyUndone ? fetchUnitStatus(channel, ids) : Promise.resolve({});
+        var custom = b.selectionMode === 'custom' || b.selectedUnitIds !== undefined;
+        var statusJob = onlyUndone && !custom ? fetchUnitStatus(channel, ids) : Promise.resolve({});
 
         return statusJob.then(function (statusMap) {
-          var pool = [];
-          for (i = 0; i < units.length; i++) {
-            var u = units[i];
-            var s = statusMap[u.unitId];
-            // partNo / partRank MUST survive the pool mapping: the grouping
-            // below keys candidates by IELTS Part. Dropping them collapses
-            // every unit into a single "Part 99" group.
-            var upn = str(u.partNo !== undefined && u.partNo !== null ? u.partNo : '');
-            pool.push({
-              unitId: u.unitId,
-              titleEn: u.titleEn,
-              titleZh: u.titleZh,
-              channel: u.channel || channel,
-              partNo: upn,
-              partRank: u.partRank !== undefined && u.partRank !== null
-                ? u.partRank : partRank(upn),
-              avgPct: s && s.averageAccuracy !== null && s.averageAccuracy !== undefined
-                ? s.averageAccuracy : 50,
-              done: isUnitDone(u.unitId, statusMap)
+          var pool = units.map(function (u) {
+            var status = statusMap[u.unitId];
+            return Object.assign({}, u, {
+              done: isUnitDone(u.unitId, statusMap) || (!status && u.catalogDone)
             });
-          }
-
-          function notExcluded(c) { return !exclude[c.unitId]; }
-          var primary = [];
-          var secondary = [];
-          for (i = 0; i < pool.length; i++) {
-            if (!notExcluded(pool[i])) continue;
-            secondary.push(pool[i]);
-            if (!(onlyUndone && pool[i].done)) primary.push(pool[i]);
-          }
-
-          var rnd = makeRng(hash32(
-            seed + '|' + channel + '|' + difficulty + '|' + (onlyUndone ? '1' : '0') +
-            '|' + (preferHighFrequency ? '1' : '0')
-          ));
-
-          var warning = null;
-          var chosen = [];
-
-          // A custom selection from the 自选组卷 panel wins over the random
-          // picker: those exact passages, in Part order.
-          var explicit = b.selectionMode === 'custom' || b.selectedUnitIds !== undefined;
-          var customChosen = explicit ? explicitPick(pool, b, need)
-            : b.selectionMode === 'random' ? null : customPick(pool, need, channel);
-          if (explicit && !customChosen) return fail('MIXED_PRACTICE_SELECTION_INVALID', 400);
-
-          if (customChosen) {
-            chosen = customChosen.slice();
-          } else {
-
-          // Group by IELTS Part and take exactly ONE passage per Part, so a
-          // paper can never contain e.g. three Part 3 passages.
-          // Fall back to `secondary` (which still honours `exclude`) before
-          // the raw pool, otherwise a re-compose may re-pick excluded parts.
-          var usable = primary.length ? primary : secondary;
-          if (!usable.length) usable = pool;
-          var groups = {};
-          for (i = 0; i < usable.length; i++) {
-            var it = usable[i];
-            var gkey = it.partNo ? String(it.partNo) : ('Part ' + (it.partRank || 99));
-            if (!groups[gkey]) groups[gkey] = { partNo: gkey, rank: it.partRank || 99, items: [] };
-            groups[gkey].items.push(it);
-          }
-
-          var gkeys = Object.keys(groups);
-          gkeys.sort(function (x, y) { return groups[x].rank - groups[y].rank; });
-
-          for (i = 0; i < gkeys.length; i++) {
-            var g = groups[gkeys[i]];
-            var items = g.items.slice();
-            shuffleInPlace(items, rnd);
-            if (preferHighFrequency) {
-              items.sort(function (x, y) { return (y.avgPct || 0) - (x.avgPct || 0); });
-            }
-            if (items.length) chosen.push(items[0]);
-          }
-
-          // Fewer distinct Parts than requested: top up from the rest rather
-          // than failing the compose.
-          if (chosen.length < need) {
-            var usedIds = {};
-            for (i = 0; i < chosen.length; i++) usedIds[chosen[i].unitId] = 1;
-            var extra = secondary.slice();
-            if (!extra.length) extra = pool.slice();
-            shuffleInPlace(extra, rnd);
-            for (i = 0; i < extra.length && chosen.length < need; i++) {
-              if (usedIds[extra[i].unitId]) continue;
-              usedIds[extra[i].unitId] = 1;
-              chosen.push(extra[i]);
-              warning = warning || 'MIXED_PRACTICE_REPEAT_ALLOWED';
-            }
-          }
-
-          chosen.sort(function (x, y) { return (x.partRank || 99) - (y.partRank || 99); });
-          // Never emit more slots than the paper asks for (reading = 3).
-          chosen = chosen.slice(0, need);
-
-          }
+          });
+          var rnd = makeRng(hash32(seed + '|' + channel + '|' + difficulty + '|' +
+            (onlyUndone ? '1' : '0') + '|' + (preferHighFrequency ? '1' : '0')));
+          var rulesBody = Object.assign({}, b, { channel: channel,
+            excludePartIds: Object.keys(exclude) });
+          var selection = W.__xxggComposeRules.choose(pool, rulesBody, rnd);
+          if (selection.error) return jsonResponse({ code: selection.error,
+            msg: selection.error, data: selection.data || null }, 400);
+          if (composeIdentity !== readToken()) { invalidateCaches(); return fail('ACCOUNT_CHANGED', 409); }
+          var chosen = selection.chosen, warning = selection.warning;
 
           var slots = [];
           for (i = 0; i < chosen.length; i++) {
@@ -1345,6 +1217,9 @@
             warningCode: warning
           });
         });
+      }).catch(function (error) {
+        return fail(error.message === 'UNIT_STATUS_UNAVAILABLE'
+          ? '无法确认未做题状态，请重试。' : '题库加载失败，请重试。', 503);
       });
     });
   }
@@ -1700,7 +1575,13 @@
           return submitUnitSubset(uid, channel, buckets[uid], comp).then(function (r) {
             if (r.ok) {
               accepted[uid] = { signature: signature, resultId: r.resultId };
-              composeStore.doneUnits[uid] = 1;
+              var owner = ownerKey();
+              if (owner) {
+                if (!composeStore.doneUnitsByOwner) composeStore.doneUnitsByOwner = {};
+                if (!composeStore.doneUnitsByOwner[owner]) composeStore.doneUnitsByOwner[owner] = {};
+                composeStore.doneUnitsByOwner[owner][uid] = 1;
+              }
+              unitStatusCache = {};
               // Save each accepted result immediately. A later unit or review
               // failure must not lose it or create duplicate server attempts.
               saveComposeStore(id);
@@ -2084,6 +1965,9 @@
           try {
             if (res && (res.status === 401 || res.status === 403)) {
               noteAuthFailure('passthrough', res.status, '', '', rawUrl);
+            }
+            if (method === 'POST' && /\/practice\/v1\/attempts$/.test(pathOf(rawUrl)) && res && res.ok) {
+              unitStatusCache = {}; unitsCache = {}; unitsCacheAt = {};
             }
           } catch (e) { }
           return isMixedPath ? neutraliseMixedAuth(res) : res;
