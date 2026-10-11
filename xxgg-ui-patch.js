@@ -533,7 +533,7 @@
   var ROWS_DIAG = false;
 
   function explainComposeRules() {
-    var body = D.querySelector('.mix-modal .mix-modal-bd');
+    var body = D.querySelector('.ielts-mix .mix-pn-bd, .mix-modal .mix-modal-bd');
     if (!body) return;
     if (!body.querySelector('.xxgg-compose-rules-note')) {
       var note = D.createElement('p');
@@ -542,7 +542,7 @@
       note.textContent = '网页随机组卷：高频优先按近7天考情次数加权选题；难度按各Part平均正确率排序分为较高、中间、较低三档（简单、中等、难）。每个Part一篇，缺题时不会用其他Part凑数。';
       body.insertBefore(note, body.firstChild);
     }
-    var paragraphs = body.querySelectorAll('p');
+    var paragraphs = body.querySelectorAll('p, [role="alert"]');
     for (var i = 0; i < paragraphs.length; i++) {
       var text = paragraphs[i].textContent;
       var original = 'hard 会偏向你个人正确率更低的已做题，easy / medium / random 也会按对应难度规则匹配。';
