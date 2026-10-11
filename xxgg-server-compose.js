@@ -1051,20 +1051,23 @@
   /* ------------------------------------------------------------------ */
   /* 1. feature entitlements                                             */
   /* ------------------------------------------------------------------ */
-  function handleEntitlements() {
-    return Promise.resolve(jsonResponse({
-      code: '200',
-      data: {
-        entitlements: {
-          mixed_practice: true,
-          high_frequency_more_rows: false
-        },
-        features: [
-          { featureCode: 'mixed_practice', enabled: true }
-        ]
-      },
-      msg: 'OK'
-    }));
+  function handleEntitlements(ctx) {
+    // Keep real ranking permissions while enabling the existing local compose UI.
+    return nativeFetch(ctx.input, ctx.init).then(function (res) {
+      if (!res.ok) return res;
+      return res.clone().json().then(function (body) {
+        if (String(body.code) !== '200' || !body.data) return res;
+        var data = body.data;
+        data.entitlements = Object.assign({}, data.entitlements, { mixed_practice: true });
+        data.features = (Array.isArray(data.features) ? data.features : []).filter(function (f) {
+          return String(f.featureCode || f.code || '') !== 'mixed_practice';
+        });
+        data.features.push({ featureCode: 'mixed_practice', enabled: true });
+        return new W.Response(JSON.stringify(body), {
+          status: res.status, statusText: res.statusText, headers: res.headers
+        });
+      });
+    });
   }
 
   /* ------------------------------------------------------------------ */

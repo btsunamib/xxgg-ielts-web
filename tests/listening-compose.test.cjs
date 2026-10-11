@@ -1655,3 +1655,15 @@ test('local quota failure preserves saved answers through a reload in the same t
   assert.equal(review.parts.length, 4);
   assert.equal(review.details[0].userAnswer, 'answer-1');
 });
+
+test('real ranking entitlement survives the browser composition bridge', async () => {
+  for (const enabled of [false, true]) {
+    const h = harness({ compose: true, initial: { token: 'real-token-for-test' },
+      fetch: async () => ok({ entitlements: { mixed_practice: false, high_frequency_more_rows: enabled },
+        features: [{ featureCode: 'high_frequency_more_rows', enabled }] }) });
+    const body = await (await h.window.fetch('https://api.test/api/practice/v1/me/feature-entitlements')).json();
+    assert.equal(body.data.entitlements.mixed_practice, true);
+    assert.equal(body.data.entitlements.high_frequency_more_rows, enabled);
+    assert.equal(body.data.features.find(f => f.featureCode === 'high_frequency_more_rows').enabled, enabled);
+  }
+});
