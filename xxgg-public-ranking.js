@@ -1,5 +1,5 @@
-/* Independent ranking of ordinary public catalogue metadata. No privileged
- * rows, account tokens, historical rankings, or persistent caches are used. */
+/* Independent public catalogue heat ranking. Only public metadata is cached;
+ * personal progress is loaded afresh through the existing unit-status API. */
 (function (root) {
   'use strict';
   function buildAlbums(units) {
@@ -29,6 +29,9 @@
             var copy = Object.assign({}, unit, { rank: rank + 1 });
             delete copy.previousRank; delete copy.rankDelta;
             delete copy.previousSevenDayReportTotal;
+            // Public catalogue cache must never carry an account's progress.
+            ['progressStatus', 'myAccuracy', 'myAcc', 'resultId', 'lastAttemptAt',
+              'lastSubmittedAt', 'submittedAt', 'status'].forEach(function (key) { delete copy[key]; });
             return copy;
           }) });
       }
@@ -47,6 +50,61 @@
   var api;
   try { api = new URL(base); } catch (_) { return; }
   var inner = root.fetch.bind(root), cached = null, expires = 0, pending = null;
+  function accountToken() {
+    try { return root.localStorage.getItem('token') || ''; } catch (_) { return ''; }
+  }
+  function hydrateProgress(albums, token) {
+    // Deep-copy the public cache; this result belongs only to this request.
+    var result = JSON.parse(JSON.stringify(albums));
+    if (!token) return Promise.resolve(result);
+    var rows = [], ids = [], seen = new Set(), statuses = new Map();
+    result.forEach(function (album) { album.slots.forEach(function (slot) {
+      slot.list.forEach(function (row) {
+        rows.push(row);
+        var id = String(row.id);
+        if (!seen.has(id)) { seen.add(id); ids.push(id); }
+      });
+    }); });
+    var next = 0;
+    function worker() {
+      var start = next; next += 50;
+      if (start >= ids.length || accountToken() !== token) return Promise.resolve();
+      var url = base.replace(/\/$/, '') + '/practice/v1/unit-status?unitIds=' +
+        encodeURIComponent(ids.slice(start, start + 50).join(','));
+      var controller = new root.AbortController();
+      var timer = root.setTimeout(function () { controller.abort(); }, 15000);
+      return inner(url, { method: 'GET', mode: 'cors', credentials: 'omit',
+        headers: { Accept: 'application/json', token: token }, signal: controller.signal
+      }).then(function (res) {
+        if (!res.ok) throw new Error('Unit status unavailable');
+        return res.json();
+      }).then(function (body) {
+        if (String(body.code) !== '200' || !body.data || !Array.isArray(body.data.list))
+          throw new Error('Unit status invalid');
+        body.data.list.forEach(function (status) {
+          if (!status) return;
+          var id = String(status.unitId == null ? status.id : status.unitId);
+          if (seen.has(id)) statuses.set(id, status);
+        });
+      }).catch(function () {
+        // Keep the public rows/averages available and retry progress next load.
+      }).finally(function () { root.clearTimeout(timer); }).then(worker);
+    }
+    return Promise.all([worker(), worker(), worker()]).then(function () {
+      if (accountToken() !== token) return result;
+      rows.forEach(function (row) {
+        var status = statuses.get(String(row.id));
+        if (!status) return;
+        ['progressStatus', 'myAccuracy', 'resultId', 'lastAttemptAt',
+          'lastSubmittedAt', 'submittedAt'].forEach(function (key) {
+          if (Object.prototype.hasOwnProperty.call(status, key)) row[key] = status[key];
+        });
+        // A missing account average must not erase the public average.
+        if (status.averageAccuracy != null) row.averageAccuracy = status.averageAccuracy;
+      });
+      return result;
+    });
+  }
   function publicJson(path) {
     return inner(base.replace(/\/$/, '') + path, {
       method: 'GET', mode: 'cors', credentials: 'omit',
@@ -87,11 +145,12 @@
     if (method !== 'GET' || url.origin !== api.origin ||
         url.pathname !== api.pathname.replace(/\/$/, '') + '/practice/v1/high-frequency/albums')
       return inner(input, init);
+    var token = accountToken();
     return inner(input, init).then(function (res) {
       if (!res.ok) return res;
       return res.clone().json().then(function (body) {
         if (String(body.code) !== '200' || !body.data || !Array.isArray(body.data.list)) return res;
-        return load().then(function (albums) {
+        return load().then(function (albums) { return hydrateProgress(albums, token); }).then(function (albums) {
           body.data.list = albums.concat(body.data.list);
           return new root.Response(JSON.stringify(body), { status: res.status,
             statusText: res.statusText, headers: res.headers });

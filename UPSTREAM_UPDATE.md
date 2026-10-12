@@ -25,7 +25,7 @@ Server-backed vocabulary, account, and catalogue features continue to use the up
 
 The web port adds independent “公开题库热度 Top 50” albums for reading and listening. Each Part shows up to 50 unique public catalogue entries, sorted by the public `sevenDayReportTotal` field descending, with unit ID ascending as the deterministic tie break. Source album IDs and entry modes are preserved. These are independently computed catalogue lists, not copies of the official permission-gated extended ranking; historical positions/deltas are unavailable. Public catalogue coverage can differ from the official ranking universe.
 
-Only ordinary public albums/units are requested for this list, without account headers or cookies. Public metadata stays in memory for five minutes; no privileged account data is cached or shared. If a catalogue source fails, the official list remains intact and the next load retries. All 50 rows are delivered together, so no ranking entitlement is required for this independent list.
+Ordinary public albums/units are requested without account headers or cookies. Public metadata stays in memory for five minutes; account progress is fetched separately as described below and is never added to this cache. If a catalogue source fails, the official list remains intact and the next load retries. All 50 rows are delivered together, so no ranking entitlement is required for this independent list.
 
 The former forced `high_frequency_more_rows` flag is removed. Real accounts retain the upstream ranking entitlement through the local composition adapter; official rankings and their pagination remain upstream-controlled. Anonymous/local accounts keep the original public official ranking view.
 
@@ -42,3 +42,13 @@ Only-undone checks the entire candidate pool in batches of 50 (three concurrent 
 Real-account caches reset on account change and successful ordinary/mixed submissions. Catalogue heat/difficulty metadata expires after five minutes. Locally accepted done markers are scoped to the account identity; unscoped legacy markers are ignored for selection. Catalogue failures leave no partial paper. Existing stored papers, review and ordinary server grading remain supported.
 
 Validation: `node --test tests/*.test.cjs` passes 111 checks covering weighted heat, realistic reading difficulty tiers, invalid candidates, missing Parts, shortage consent, full status coverage, account changes, submit invalidation, manual selection, and the earlier playback/grading/storage/ranking contracts.
+
+## Ranking progress and default accuracy repair (2026-10-12)
+
+The added public Top 50 lists previously contained public catalogue metadata only, so the renderer treated completed units as unpractised and lacked personal accuracy/result links. Each ranking refresh now hydrates its source unit IDs through the existing `/practice/v1/unit-status` API, in batches of 50 with at most three concurrent requests. The existing browser adapters continue to serve device-local progress for local sessions. Completion status, personal accuracy (including 0%), result ID and last attempt date are merged by unit ID; missing account averages retain the public average.
+
+Only the public catalogue is cached. Personal status is read afresh for every ranking refresh, is never persisted by this adapter, and is discarded if the session token changes while a request is running. A failed status request leaves the public rows and official lists available and retries on the next refresh. Public catalogue requests remain credential-free; the account token is sent only to the configured practice API's status endpoint.
+
+All high-frequency ranking surfaces now default to accuracy when that display option is available. Users can still select report count, completion date or notes through the existing filter. The shipped bundle's alias offsets and SHA-256 contract have been updated along with the script cache versions.
+
+Validation: `node --test tests/*.test.cjs` passes 116 checks, including fresh progress after completion, 350-row batch coverage, 0% accuracy, account changes during requests, status failures, and shipped renderer defaults/status mapping. These use deterministic account responses rather than a live student account.
