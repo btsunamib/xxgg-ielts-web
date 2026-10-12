@@ -192,15 +192,15 @@ test('a failed status read keeps public/official lists available and retries on 
 });
 
 test('shipped ranking defaults to accuracy while preserving report-count selection and completion mapping', () => {
-  const bundle = fs.readFileSync(path.join(__dirname, '../assets/index-C1Rxnmka.js'), 'utf8');
+  const bundle = fs.readFileSync(path.join(__dirname, '../assets/index-c56b88fb.js'), 'utf8');
   const section = (start, end) => {
     const a = bundle.indexOf(start), b = bundle.indexOf(end, a);
     assert.ok(a >= 0 && b > a);
     return bundle.slice(a, b);
   };
-  const ctx = vm.createContext({ Ls: ['accuracy', 'reportCount', 'completedAt', 'notes'],
-    Ao: [], So: [], aN: ['accuracy', 'reportCount', 'completedAt', 'notes'], Ov: ['completedAt'], uN: null });
+  const ctx = vm.createContext({});
   vm.runInContext([
+    'const ' + section('Ao=Object.freeze(', 'function Dv('),
     section('function gN(', 'const pN='),
     section('function Dv(', 'function cN('),
     section('function dN(', 'function ia('),
@@ -212,6 +212,8 @@ test('shipped ranking defaults to accuracy while preserving report-count selecti
   assert.equal(defaults.defaultDisplayMode, 'accuracy');
   assert.equal(ctx.choose(undefined, defaults, true), 'accuracy');
   assert.equal(ctx.choose(undefined, defaults, false), 'accuracy');
+  assert.equal(ctx.choose(undefined, undefined, true), 'accuracy', 'real fallback must also default to accuracy');
+  assert.equal(ctx.choose(undefined, undefined, false), 'accuracy');
   assert.equal(ctx.choose('reportCount', defaults, true), 'reportCount');
   assert.equal(ctx.defaults({ display: ['reportCount'] }).defaultDisplayMode, 'reportCount');
   const mapped = ctx.mapStatus({ progressStatus: 'done', myAccuracy: 0, averageAccuracy: 70 });

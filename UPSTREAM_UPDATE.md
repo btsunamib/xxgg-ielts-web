@@ -52,3 +52,11 @@ Only the public catalogue is cached. Personal status is read afresh for every ra
 All high-frequency ranking surfaces now default to accuracy when that display option is available. Users can still select report count, completion date or notes through the existing filter. The shipped bundle's alias offsets and SHA-256 contract have been updated along with the script cache versions.
 
 Validation: `node --test tests/*.test.cjs` passes 116 checks, including fresh progress after completion, 350-row batch coverage, 0% accuracy, account changes during requests, status failures, and shipped renderer defaults/status mapping. These use deterministic account responses rather than a live student account.
+
+## First-navigation module identity repair (2026-10-12)
+
+The HTML entry loaded the main ES module with a query-string version, while lazy exam/review pages imported its bare filename. Since ES module identity includes the query string, the first navigation loaded a second Vue/router/application bootstrap, replacing the active application and resetting catalogue/ranking state. This affected reading, listening and the other lazy page routes, rather than only the new ranking.
+
+The HTML entry and every chunk now reference exactly the same canonical main-module URL without a query. The entire 21-file JavaScript dependency graph has fresh filenames, including shared chunks, so cached pages cannot import the old bootstrap. CSS filenames are retained. Import references, preload targets, bundle contract paths/digests and the published version are updated together. The ranking's fallback configuration now also defaults to accuracy.
+
+`tests/module-navigation.test.cjs` compiles and links the deployed ES modules for all eight lazy routes and asserts that their dependency graph contains only the original HTML entry instance. The preceding deployment fails this regression on its first lazy-page navigation by linking two application modules. Validation: `node --test tests/*.test.cjs` passes 118 checks. This exercises the real shipped module graph and renderer contracts; a live-account browser click test remains separate.
