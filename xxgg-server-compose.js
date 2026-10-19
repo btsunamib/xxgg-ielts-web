@@ -170,7 +170,7 @@
       reason: reason || '',
       apiBase: function () { return apiBase(); },
       hasRealSession: hasRealSession,
-      // Used by xxgg-compose-picker.js to list candidates for the panel.
+      // Catalogue access for diagnostics.
       listUnits: function (channel, refresh) { return loadUnits(channel, refresh); },
       customSelection: function () { return cloneJson(readCustomSelection()); },
       store: function () { return cloneJson(composeStore); },
@@ -1085,11 +1085,11 @@
   }
 
   /* ------------------------------------------------------------------ */
-  /* Custom selection ("自选组卷")                                        */
+  /* Legacy custom selection diagnostics (not used to compose papers)     */
   /*                                                                     */
-  /* xxgg-compose-picker.js writes:                                       */
+  /* Older versions stored:                                              */
   /*   { enabled: true, channel: 'reading', unitIds: ['u1','u2','u3'] }   */
-  /* When it matches the requested channel it replaces the random picker. */
+  /* Explicit request selections are handled by the shared rules below.  */
   /* ------------------------------------------------------------------ */
   var CUSTOM_KEY = 'xxgg.compose.custom.v1';
   var MAX_CUSTOM_PICKS = 40;
@@ -1111,8 +1111,6 @@
     };
   }
 
-  // Returns the user's passages (Part-ordered, capped at `need`) or null when
-  // there is no usable custom selection for this channel.
   function handleCompose(ctx) {
     return readBody(ctx.input, ctx.init).then(function (body) {
       var b = isPlainObject(body) ? body : {};

@@ -9,7 +9,7 @@ Updated from 0.9.16-rc.3 using the official desktop installer, without running t
 
 The repository contains the renderer from `resources/app.asar/dist`, the existing browser bridge, and the existing web request adapters. No Electron executable, native database, account credentials, or user data is included.
 
-The new renderer includes the native manual composition panel and vocabulary features. Native manual selection routes through the existing web composition adapter. The web Part picker remains available from “逐 Part 自选篇目” / “调整各 Part 篇目”. Opening an editor hides launch actions; cancelling or failing an edit retains the original composition.
+The new renderer includes the native manual composition panel and vocabulary features. Native manual selection routes through the existing web composition adapter. The extra web Part picker was retired on 2026-10-19; the native random and manual composition surfaces remain available through the web request adapter.
 
 Retained browser fixes include hidden-answer question audio, four-Part automatic playback, review fallback without forced logout, account/session guards, and submission when draft storage is full. All new renderer imports and browser scripts are pinned to this release.
 
@@ -86,3 +86,12 @@ Validation: `node --test tests/*.test.cjs` passes 135 checks against the shipped
 Both composition adapters now honour the caller's AbortSignal. A slow catalogue/status request previously outlived the request client's timeout, leaving the renderer waiting with its compose button disabled. Timeouts now reach the renderer, release the loading state and allow retry. Late read responses cannot create a cancelled composition; shared catalogue reads and accepted-answer submission recovery keep their existing lifecycles.
 
 Validation: all 137 checks pass. Delayed-catalogue regressions exercise the shipped controller in both account and device modes, checking timeout recovery, no late paper creation and successful retry. The deployed reading random and manual flows were also exercised in a browser with a device-local session; both opened the reading page with passage text. This does not establish the exact cause of an individual user's report or validate their account session.
+
+
+## Native composition UI only (2026-10-19)
+
+Removed the extra “逐 Part 自选篇目” editor, its script, controller state, mount callbacks and hidden-footer conditions. Opening it from native manual mode could successfully create a paper while leaving the native panel showing an unrelated empty selection, making the action look unresponsive. Random and manual composition now use only the native panel.
+
+The official native controller disables manual launch for an account without mixed-practice entitlement. The web bridge remains necessary: it composes the selected public units locally and grades real-account answers through ordinary practice requests. Mocked unentitled-account tests cover native reading and listening selection with the official compose endpoint refusing access; the bridged flow never calls that endpoint. No live unentitled student account was used.
+
+All 21 JavaScript chunks received fresh URLs together, with consistent imports, preload paths, bundle alias ranges and SHA-256 contracts. The released version marker was refreshed. All 131 current checks pass, including native manual/random launch actions and single-instance lazy navigation. Retired editor-only checks were removed with the deleted feature.

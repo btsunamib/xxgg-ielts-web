@@ -192,7 +192,9 @@ test('a failed status read keeps public/official lists available and retries on 
 });
 
 test('shipped ranking defaults to accuracy while preserving report-count selection and completion mapping', () => {
-  const bundle = fs.readFileSync(path.join(__dirname, '../assets/index-e7f3166d.js'), 'utf8');
+  const html = fs.readFileSync(path.join(__dirname, '../index.html'), 'utf8');
+  const entry = html.match(/type="module"[^>]*src="\.\/([^"]+\.js)"/)[1];
+  const bundle = fs.readFileSync(path.join(__dirname, '..', entry), 'utf8');
   const section = (start, end) => {
     const a = bundle.indexOf(start), b = bundle.indexOf(end, a);
     assert.ok(a >= 0 && b > a);

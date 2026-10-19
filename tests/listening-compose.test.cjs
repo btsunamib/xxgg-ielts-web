@@ -1235,92 +1235,7 @@ for (const local of [false, true]) {
   });
 }
 
-// Small DOM stand-in for the plain editor; tests use the shipped event handlers.
-function editorRoot() {
-  const root = { classList: { add() {} }, nodes: [], html: '' };
-  function parse(html) {
-    return [...html.matchAll(/<(button|input|div)\b([^>]*)>/g)].map(match => {
-      const attrs = Object.fromEntries([...match[2].matchAll(/([\w-]+)="([^"]*)"/g)].map(a => [a[1], a[2]]));
-      const node = { attrs, handlers: {}, disabled: /\sdisabled(?:\s|$)/.test(match[2]),
-        getAttribute: name => attrs[name] ?? null,
-        addEventListener: (name, callback) => { node.handlers[name] = callback; },
-        click() { if (!node.disabled) return node.handlers.click?.({ currentTarget: node, target: node }); },
-      };
-      let content = '', children = [];
-      Object.defineProperty(node, 'innerHTML', { get: () => content, set(value) { content = value; children = parse(value); } });
-      node.children = () => children;
-      return node;
-    });
-  }
-  Object.defineProperty(root, 'innerHTML', { get: () => root.html, set(value) { root.html = value; root.nodes = parse(value); } });
-  root.querySelectorAll = selector => {
-    const nodes = root.nodes.flatMap(node => [node, ...node.children()]);
-    const action = selector.match(/data-ce-action="([^"]+)"/);
-    return nodes.filter(node => action ? node.attrs['data-ce-action'] === action[1]
-      : selector[0] === '.' && (node.attrs.class || '').split(' ').includes(selector.slice(1)));
-  };
-  root.querySelector = selector => root.querySelectorAll(selector)[0] || null;
-  root.action = (name, value) => root.querySelectorAll(`[data-ce-action="${name}"]`)
-    .find(node => value == null || node.attrs['data-unit-id'] === value || node.attrs['data-index'] === String(value));
-  return root;
-}
-function pickerRuntime(listUnits, random = Math.random) {
-  const window = { document: { getElementById: () => null, createElement: () => ({}), head: { appendChild() {} } },
-    localStorage: storage(), __xxggServerCompose: { listUnits } };
-  vm.runInNewContext(readBundle(path.join(root, 'xxgg-compose-picker.js'), 'utf8'), { window, Math: Object.assign(Object.create(Math), { random }) });
-  return window.__xxggComposePicker;
-}
 const settleEditor = () => new Promise(resolve => setImmediate(resolve));
-
-for (const channel of ['reading', 'listening']) {
-  test(`${channel} random picker preserves manual slots, replaces one Part, and reshuffles a complete paper`, async () => {
-    const need = channel === 'reading' ? 3 : 4;
-    const units = Array.from({ length: need }, (_, i) => ['a', 'b'].map(variant => ({
-      unitId: `${i + 1}-${variant}`, partRank: i + 1, titleEn: `Part ${i + 1} ${variant}`,
-    }))).flat();
-    let applied;
-    const picker = pickerRuntime(async () => units, () => 0);
-    const root = editorRoot();
-    picker.mount(root, { channel, onApply: async ids => { applied = Array.from(ids); } });
-    await settleEditor();
-    root.action('choose', '1-b').click();
-    root.action('random-all').click();
-    assert.match(root.innerHTML, /随机换一组/);
-    root.action('apply').click(); await settleEditor();
-    assert.deepEqual(applied, ['1-b', ...Array.from({ length: need - 1 }, (_, i) => `${i + 2}-a`)]);
-    root.action('random-part', 1).click();
-    root.action('apply').click(); await settleEditor();
-    assert.deepEqual(applied, ['1-b', '2-b', ...Array.from({ length: need - 2 }, (_, i) => `${i + 3}-a`)]);
-    root.action('random-all').click();
-    root.action('apply').click(); await settleEditor();
-    assert.deepEqual(applied, ['1-a', '2-a', ...Array.from({ length: need - 2 }, (_, i) => `${i + 3}-b`)]);
-    root.action('edit', 0).click();
-    root.action('choose', '1-b').click();
-    root.action('apply').click(); await settleEditor();
-    assert.equal(applied[0], '1-b', 'random choices remain manually editable');
-  });
-}
-
-test('random fill is atomic when a Part has no candidates and cannot modify a pending submission', async () => {
-  let finish;
-  const units = [1, 2, 3].map(n => ({ unitId: `p${n}`, partRank: n, titleEn: `Passage ${n}` }));
-  const root = editorRoot();
-  pickerRuntime(async () => units, () => 0).mount(root, { channel: 'listening' });
-  await settleEditor();
-  root.action('choose', 'p1').click(); root.action('random-all').click();
-  assert.match(root.innerHTML, /已选 1 \/ 4/);
-  assert.match(root.innerHTML, /P4 暂无可选篇目/);
-  assert.equal(root.action('apply').disabled, true);
-  const pending = editorRoot();
-  const all = [...units, { unitId: 'p4', partRank: 4, titleEn: 'Passage 4' }];
-  pickerRuntime(async () => all, () => 0).mount(pending, { channel: 'listening',
-    onApply: () => new Promise(resolve => { finish = resolve; }) });
-  await settleEditor(); pending.action('random-all').click(); pending.action('apply').click();
-  assert.equal(pending.action('random-all').disabled, true);
-  assert.ok(pending.querySelectorAll('[data-ce-action="random-part"]').every(button => button.disabled));
-  finish(); await settleEditor();
-  assert.equal(pending.action('random-all').disabled, false);
-});
 
 function questionReviewRuntime(fetchAnalysis = async () => null) {
   const ref = value => ({ value });
@@ -1504,20 +1419,6 @@ test('auto playback waits for exam start and audio readiness and never restarts 
   }
 });
 
-test('a disposed picker response cannot replace the newly selected channel', async () => {
-  const replies = {};
-  const picker = pickerRuntime(channel => new Promise(resolve => { replies[channel] = resolve; }));
-  const reading = editorRoot(), listening = editorRoot();
-  const dispose = picker.mount(reading, { channel: 'reading' });
-  await settleEditor(); dispose();
-  picker.mount(listening, { channel: 'listening' }); await settleEditor();
-  replies.listening([{ unitId: 'l1', titleEn: 'Listening passage', partRank: 1 }]); await settleEditor();
-  replies.reading([{ unitId: 'r1', titleEn: 'Stale reading passage', partRank: 1 }]); await settleEditor();
-  assert.equal(reading.innerHTML, '');
-  assert.match(listening.querySelector('.xxgg-ce-list').innerHTML, /Listening passage/);
-  assert.doesNotMatch(listening.innerHTML, /Stale reading/);
-});
-
 for (const channel of ['reading', 'listening']) {
   const need = channel === 'reading' ? 3 : 4;
   test(`${channel} explicit selection reaches the actual paper in Part order in both modes`, async () => {
@@ -1579,6 +1480,38 @@ for (const channel of ['reading', 'listening']) {
   });
 }
 
+for (const channel of ['reading', 'listening']) {
+  test(`native ${channel} manual selection works through the web bridge when the account has no official compose entitlement`, async () => {
+    let officialComposeRequests = 0;
+    const upstream = editorUpstream();
+    const source = async (url, init) => {
+      const pathname = new URL(url).pathname;
+      if (pathname.endsWith('/feature-entitlements')) return ok({ entitlements: { mixed_practice: false },
+        features: [{ featureCode: 'mixed_practice', enabled: false }] });
+      if (pathname.endsWith('/mixed-practice/compose')) { officialComposeRequests++; return json({ code: '403', msg: 'MIXED_PRACTICE_ENTITLEMENT_REQUIRED' }, 403); }
+      return upstream(url, init);
+    };
+    for (const compose of [false, true]) {
+      const h = harness({ initial: session, compose, fetch: source });
+      const controller = mixedController(h);
+      controller.openMixModal(); controller.setMixKind(channel); controller.setMixMode('manual');
+      await settleEditor();
+      const ids = Array.from({ length: channel === 'reading' ? 3 : 4 }, (_, i) => `${channel}-${i + 1}-b`);
+      for (let i = 0; i < ids.length; i++) controller.toggleMixPick({ id: ids[i], partId: `part-${ids[i]}`,
+        channel, mixedSelectable: true, mixedSlot: `P${i + 1}`, en: ids[i] }, 'editor-album');
+      assert.equal(controller.mixManualComplete.value, true);
+      assert.equal(controller.mixManualStartDisabled.value, !compose, 'the native feature needs the web bridge for an unentitled account');
+      if (!compose) continue;
+      await controller.startManualMixedExam();
+      assert.equal(h.ctx.destination.name, channel === 'reading' ? 'ReadingExam' : 'ListeningExam');
+      const exam = await h.api.getMixedPracticeExam(h.ctx.destination.query.compositionId);
+      assert.deepEqual(Array.from(exam.parts, p => p.originalUnitId), ids);
+      expectSession(h);
+    }
+    assert.equal(officialComposeRequests, 0, 'the bridged native UI must not depend on the gated official composition endpoint');
+  });
+}
+
 test('random compose ignores an old global custom override and can reshuffle', async () => {
   const initial = { ...session, 'xxgg.compose.custom.v1': JSON.stringify({ enabled: true, channel: 'listening',
     unitIds: ['listening-1-a', 'listening-2-a', 'listening-3-a', 'listening-4-a'] }) };
@@ -1589,84 +1522,7 @@ test('random compose ignores an old global custom override and can reshuffle', a
   assert.ok(next.slots.every(slot => !first.slots.some(previous => previous.unitId === slot.unitId)));
 });
 
-test('random paper edits create a new paper and submit only the updated source units', async () => {
-  const posts = [];
-  const h = harness({ initial: session, compose: true, fetch: editorUpstream(posts) });
-  const controller = mixedController(h);
-  controller.openMixModal(); controller.setMixKind('listening');
-  await settleEditor();
-  await controller.startMixAssemble();
-  assert.equal(controller.mixPhase.value, 'result', controller.mixWarningMessage.value);
-  const before = Array.from(controller.mixItems.value, item => item.unitId);
-  const original = Object.keys(JSON.parse(h.localStorage.getItem('xxgg.servercompose.v1')).compositions)[0];
-  let draft;
-  h.window.__xxggComposePicker = { mount: (_, options) => { draft = options; return () => {}; } };
-  controller.editMixSlot(1); controller.mountMixEditor({ el: {} });
-  assert.deepEqual(Array.from(draft.slots, s => s.unitId), before);
-  // No navigation while a draft remains open.
-  await controller.startMixedExam(); assert.equal(h.ctx.destination, undefined);
-  const updated = before.slice(); updated[1] = `listening-2-${before[1].endsWith('-a') ? 'b' : 'a'}`;
-  assert.equal(await draft.onApply(updated), true);
-  assert.deepEqual(Array.from(controller.mixItems.value, item => item.unitId), updated);
-  assert.equal(controller.mixEditorSlot.value, -1);
-  await controller.startMixedExam();
-  const composition = h.ctx.destination.query.compositionId;
-  assert.notEqual(composition, original);
-  const exam = await h.api.getMixedPracticeExam(composition);
-  const parts = exam.parts.map(p => ({ ...p, groups: p.groups.map(g => ({ ...g, questions: g.questions.map(q => ({ ...q,
-    userAnswer: `answer-${p.originalUnitId.split('-')[1]}-${p.originalUnitId.split('-')[2]}` })) })) }));
-  await h.api.submitMixedPracticeAttempt(composition, { channel: 'listening', parts });
-  assert.deepEqual(posts, updated);
-  assert.equal((await h.api.getMixedPracticeReview(composition)).score, 4);
-  assert.deepEqual(JSON.parse(h.localStorage.getItem('xxgg.servercompose.v1')).compositions[original].slots.map(s => s.unitId), before);
-});
-
-test('cancelling or failing an edit retains the original paper', async () => {
-  const h = harness({ initial: session, compose: true, fetch: editorUpstream() });
-  const controller = mixedController(h);
-  controller.openMixModal(); await settleEditor(); await controller.startMixAssemble();
-  assert.equal(controller.mixPhase.value, 'result', controller.mixWarningMessage.value);
-  const before = Array.from(controller.mixItems.value, item => item.unitId);
-  let draft;
-  h.window.__xxggComposePicker = { mount: (_, options) => { draft = options; return () => {}; } };
-  controller.editMixSlot(0); controller.mountMixEditor({ el: {} }); draft.onCancel();
-  assert.equal(controller.mixEditorSlot.value, -1);
-  assert.deepEqual(Array.from(controller.mixItems.value, item => item.unitId), before);
-  controller.editMixSlot(0); controller.mountMixEditor({ el: {} });
-  assert.notEqual(await draft.onApply(['missing']), true);
-  assert.deepEqual(Array.from(controller.mixItems.value, item => item.unitId), before);
-  assert.equal(controller.mixEditorSlot.value, 0);
-});
-
-test('the inline editor selects one passage per Part, preserves search input, and applies exact IDs', async () => {
-  const rows = Array.from({ length: 4 }, (_, i) => ({ unitId: `u${i + 1}`, titleEn: `Title ${i + 1}`, partRank: i + 1 }));
-  let applied;
-  const picker = pickerRuntime(async () => rows);
-  const editor = editorRoot(); picker.mount(editor, { channel: 'listening', onApply: ids => { applied = Array.from(ids); return true; } });
-  await settleEditor(); assert.equal(editor.action('apply').disabled, true);
-  const search = editor.querySelector('.xxgg-ce-search');
-  search.handlers.input({ target: { value: 'Title' } });
-  assert.equal(editor.querySelector('.xxgg-ce-search'), search);
-  for (let i = 1; i <= 4; i++) {
-    const choices = editor.querySelectorAll('[data-ce-action="choose"]');
-    assert.equal(choices.length, 1); assert.equal(choices[0].attrs['data-unit-id'], `u${i}`);
-    editor.action('choose', `u${i}`).click();
-  }
-  assert.equal(editor.action('apply').disabled, false);
-  await editor.action('apply').click(); assert.deepEqual(applied, ['u1','u2','u3','u4']);
-});
-
-test('editor cancellation never applies selections and failed application retains the draft', async () => {
-  const picker = pickerRuntime(async () => [{ unitId: 'r1', partRank: 1 }, { unitId: 'r2', partRank: 2 }, { unitId: 'r3', partRank: 3 }]);
-  let calls = 0, cancelled = false;
-  const editor = editorRoot(); picker.mount(editor, { channel: 'reading', slots: [1,2,3].map(i => ({ unitId: `r${i}`, partNo: `Part ${i}` })),
-    onApply: async () => { calls++; return false; }, onCancel: () => { cancelled = true; } });
-  await settleEditor(); editor.action('cancel').click(); assert.equal(cancelled, true); assert.equal(calls, 0);
-  await editor.action('apply').click(); assert.equal(calls, 1); assert.match(editor.innerHTML, /未能应用/);
-  assert.equal(editor.action('apply').disabled, false);
-});
-
-test('the upstream sidebar preserves native modes, mounts web choices, and hides launch actions while editing', () => {
+test('the sidebar keeps native manual and random launch actions without the retired picker', () => {
   const vnode = (tag, props, children) => ({ tag, props: props || {}, children });
   const ctx = vm.createContext({ I: getter => ({ get value() { return getter(); } }), r: vnode, g: vnode,
     f() {}, pr: 'transition', be: 'fragment', je: (rows, callback) => rows.map(callback), q: () => null,
@@ -1676,26 +1532,31 @@ test('the upstream sidebar preserves native modes, mounts web choices, and hides
   const actual = fs.readFileSync(path.join(root, mainPath), 'utf8');
   const modal = section(actual, 'HN={key:0,class:"ielts-mix"', 'r4=xt').replace(/,$/, ';');
   vm.runInContext('const ' + modal + '\nglobalThis.modal=s4;', ctx);
+  const clicked = [];
   const props = { mixModalOpen: true, mixMode: 'random', mixPhase: 'config', mixKind: 'reading',
-    mixSelectionMode: 'random', mixEditorSlot: -1, mixItems: [], mixSlotItems: [],
+    mixItems: [], mixSlotItems: [],
     mixDifficultyStops: [{ v: 'random', label: '随机' }], mixDifficultyIndex: 0,
-    setMixSelectionMode() {}, editMixSlot() {}, mountMixEditor() {}, unmountMixEditor() {},
+    mixAssembleLabel: '开始组卷', mixManualStartLabel: '开始做题', mixStartExamLabel: '开始做题',
+    startMixAssemble: () => clicked.push('random'), startManualMixedExam: () => clicked.push('manual'),
+    startMixedExam: () => clicked.push('result'),
     mixPermBannerVisible: false };
   const render = ctx.modal.setup(props);
   function nodes(tree) { return Array.isArray(tree) ? tree.flatMap(nodes) : tree && typeof tree === 'object' ? [tree, ...nodes(tree.children)] : []; }
   let rendered = nodes(render({}, []));
   assert.ok(rendered.some(n => n.props.class === 'mix-pn-ft'));
-  props.mixSelectionMode = 'custom';
+  assert.ok(!JSON.stringify(rendered).includes('逐 Part 自选篇目'));
+  assert.ok(!JSON.stringify(rendered).includes('xxgg-web-part-editor'));
+  const launch = label => rendered.find(n => n.tag === 'button' && JSON.stringify(n.children).includes(label));
+  launch('开始组卷').props.onClick();
+  props.mixMode = 'manual';
   rendered = nodes(render({}, []));
-  assert.ok(rendered.some(n => n.props.onVnodeMounted === props.mountMixEditor));
-  assert.ok(!rendered.some(n => n.props.class === 'mix-pn-ft'));
-  props.mixPhase = 'result'; props.mixSelectionMode = 'random'; props.mixEditorSlot = 1;
+  launch('开始做题').props.onClick();
+  props.mixMode = 'random'; props.mixPhase = 'result';
   rendered = nodes(render({}, []));
-  assert.ok(rendered.some(n => n.props.onVnodeMounted === props.mountMixEditor));
-  assert.ok(!rendered.some(n => n.props.class === 'mix-pn-ft'));
-  props.mixEditorSlot = -1;
-  rendered = nodes(render({}, []));
-  assert.ok(rendered.some(n => n.props.class === 'mix-pn-ft'));
+  launch('开始做题').props.onClick();
+  assert.deepEqual(clicked, ['random', 'manual', 'result']);
+  assert.doesNotMatch(html, /xxgg-compose-picker\.js/);
+  assert.equal(fs.existsSync(path.join(root, 'xxgg-compose-picker.js')), false);
 });
 
 test('quota errors never evict the paper currently being answered (local-mix-33)', async () => {
