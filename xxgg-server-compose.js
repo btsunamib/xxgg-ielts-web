@@ -1213,6 +1213,7 @@
 
           return ok({
             compositionId: compositionId,
+            channel: channel,
             slots: slots,
             warningCode: warning
           });

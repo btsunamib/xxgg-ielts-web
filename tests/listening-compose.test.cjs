@@ -1412,11 +1412,32 @@ for (const channel of ['reading', 'listening']) {
       const h = harness({ initial: local ? {} : session, local, compose: !local, fetch: editorUpstream() });
       const ids = Array.from({ length: need }, (_, i) => `${channel}-${i + 1}-b`);
       const composition = await h.api.composeMixedPractice({ channel, selectionMode: 'custom', selectedUnitIds: ids.slice().reverse() });
+      assert.equal(composition.channel, channel, 'the launch controller needs the composed paper channel');
       assert.deepEqual(Array.from(composition.slots, s => s.unitId), ids);
       const exam = await h.api.getMixedPracticeExam(composition.compositionId);
       assert.deepEqual(Array.from(exam.parts, p => p.originalUnitId), ids);
     }
   });
+}
+
+for (const local of [false, true]) {
+  for (const channel of ['reading', 'listening']) {
+    test(`${local ? 'local' : 'account'} ${channel} composed paper opens the matching exam page`, async () => {
+      const h = harness({ initial: local ? {} : session, local, compose: !local, fetch: editorUpstream() });
+      const controller = mixedController(h);
+      controller.openMixModal(); controller.setMixKind(channel);
+      await settleEditor();
+      await controller.startMixAssemble();
+      assert.equal(controller.mixPhase.value, 'result', controller.mixWarningMessage.value);
+      await controller.startMixedExam();
+      const destination = h.ctx.destination;
+      assert.equal(destination.name, channel === 'reading' ? 'ReadingExam' : 'ListeningExam');
+      assert.equal(destination.query.channel, channel);
+      const exam = await h.api.getMixedPracticeExam(destination.query.compositionId);
+      assert.equal(exam.channel, channel);
+      assert.equal(exam.parts.length, channel === 'reading' ? 3 : 4);
+    });
+  }
 }
 
 test('invalid drafts never create a paper or silently top up the requested selection', async () => {
