@@ -100,7 +100,31 @@
     });
     return { chosen: chosen, warning: repeats ? 'MIXED_PRACTICE_REPEAT_ALLOWED' : null };
   }
-  var api = { candidate: candidate, choose: choose };
+  // Fetch adapters must honour the caller's timeout even while shared catalogue
+  // reads finish in the background. Only compose uses this; accepted exam
+  // submissions keep their existing result-recovery lifecycle.
+  function runCompose(signal, run) {
+    if (!signal || typeof signal.addEventListener !== 'function') return Promise.resolve().then(run);
+    return new Promise(function (resolve, reject) {
+      var settled = false;
+      function finish(callback, value) {
+        if (settled) return;
+        settled = true;
+        signal.removeEventListener('abort', abort);
+        callback(value);
+      }
+      function abort() {
+        var error = new Error('Composition request aborted');
+        error.name = 'AbortError';
+        finish(reject, error);
+      }
+      if (signal.aborted) { abort(); return; }
+      signal.addEventListener('abort', abort, { once: true });
+      Promise.resolve().then(function () { if (!settled) return run(); })
+        .then(function (value) { finish(resolve, value); }, function (error) { finish(reject, error); });
+    });
+  }
+  var api = { candidate: candidate, choose: choose, runCompose: runCompose };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   if (root) root.__xxggComposeRules = api;
 })(typeof window === 'undefined' ? null : window);

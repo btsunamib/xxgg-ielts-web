@@ -1166,6 +1166,7 @@
           var selection = W.__xxggComposeRules.choose(pool, rulesBody, rnd);
           if (selection.error) return jsonResponse({ code: selection.error,
             msg: selection.error, data: selection.data || null }, 400);
+          if (ctx.signal && ctx.signal.aborted) return fail('MIXED_PRACTICE_COMPOSE_CANCELLED', 499);
           if (composeIdentity !== readToken()) { invalidateCaches(); return fail('ACCOUNT_CHANGED', 409); }
           var chosen = selection.chosen, warning = selection.warning;
 
@@ -1983,15 +1984,21 @@
       params: route.params,
       input: input,
       init: init,
+      signal: (init && init.signal) || (input && input.signal) || null,
       body: function () { return readBody(input, init); }
     };
 
     return Promise.resolve()
-      .then(function () { return dispatch(route.name, ctx); })
+      .then(function () {
+        return route.name === 'mixed-compose'
+          ? W.__xxggComposeRules.runCompose(ctx.signal, function () { return dispatch(route.name, ctx); })
+          : dispatch(route.name, ctx);
+      })
       .then(function (res) {
         if (res) return res;
         return nativeFetch(input, init);
-      }, function () {
+      }, function (error) {
+        if (error && error.name === 'AbortError') throw error;
         // Never surface a 401 / code 401 to the app.
         return jsonResponse({
           code: '500',

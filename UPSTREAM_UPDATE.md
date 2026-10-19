@@ -80,3 +80,9 @@ Device-local submissions reject missing, duplicate or unrelated Parts before rec
 Completed device-local mixed papers update source-unit progress and accuracy, and only-undone composition excludes those units. Each source result link and history item opens only its own saved passage, without duplicating the complete attempt in history. Progress and part-code mappings survive a reload through session storage when primary storage is full.
 
 Validation: `node --test tests/*.test.cjs` passes 135 checks against the shipped renderer and mocked APIs. New checks cover both channels and storage fallback. Live account/browser exercise remains separate.
+
+## Composition timeout repair (2026-10-19)
+
+Both composition adapters now honour the caller's AbortSignal. A slow catalogue/status request previously outlived the request client's timeout, leaving the renderer waiting with its compose button disabled. Timeouts now reach the renderer, release the loading state and allow retry. Late read responses cannot create a cancelled composition; shared catalogue reads and accepted-answer submission recovery keep their existing lifecycles.
+
+Validation: all 137 checks pass. Delayed-catalogue regressions exercise the shipped controller in both account and device modes, checking timeout recovery, no late paper creation and successful retry. The deployed reading random and manual flows were also exercised in a browser with a device-local session; both opened the reading page with passage text. This does not establish the exact cause of an individual user's report or validate their account session.

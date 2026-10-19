@@ -1201,6 +1201,40 @@ function mixedController(h, authenticated = true) {
   return h.ctx.controller;
 }
 
+for (const local of [false, true]) {
+  test(`${local ? 'local' : 'account'} slow composition times out, unlocks the button and cannot save a late paper`, async () => {
+    let release;
+    const gate = new Promise(resolve => { release = resolve; });
+    const upstream = editorUpstream();
+    const h = harness({ initial: local ? {} : session, local, compose: !local, fetch: async (url, init) => {
+      if (new URL(url).pathname.endsWith('/albums')) await gate;
+      return upstream(url, init);
+    } });
+    const originalCompose = h.api.composeMixedPractice.bind(h.api);
+    h.api.composeMixedPractice = body => h.api.request('/practice/v1/mixed-practice/compose', body, 'POST', { timeout: 10 });
+    const controller = mixedController(h);
+    controller.openMixModal();
+    await settleEditor();
+    const pending = controller.startMixAssemble();
+    try {
+      const finished = await Promise.race([pending.then(() => true), new Promise(resolve => setTimeout(() => resolve(false), 60))]);
+      assert.equal(finished, true, 'the caller timeout must end the intercepted request');
+      assert.equal(controller.mixLoading.value, false);
+      assert.equal(controller.mixAssembleDisabled.value, false);
+      assert.match(controller.mixWarningMessage.value, /重试/);
+    } finally {
+      release();
+      await pending;
+    }
+    await new Promise(resolve => setTimeout(resolve, 10));
+    const store = local ? h.window.__xxggLocalMode.store : h.window.__xxggServerCompose.store();
+    assert.equal(Object.keys(store.compositions).length, 0, 'a timed-out request must not create a hidden paper');
+    h.api.composeMixedPractice = originalCompose;
+    await controller.startMixAssemble();
+    assert.equal(controller.mixPhase.value, 'result');
+  });
+}
+
 // Small DOM stand-in for the plain editor; tests use the shipped event handlers.
 function editorRoot() {
   const root = { classList: { add() {} }, nodes: [], html: '' };

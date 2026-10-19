@@ -2037,6 +2037,7 @@ function codeByPartFor(unitId) {
       var need = slotCountFor(channel);
 
       return loadUnits(channel).then(function (units) {
+        if (ctx.signal && ctx.signal.aborted) return fail('MIXED_PRACTICE_COMPOSE_CANCELLED', 499);
         var pool = units.map(function (u) {
           return Object.assign({}, u, { done: isUnitDone(u.unitId) });
         });
@@ -2050,6 +2051,7 @@ function codeByPartFor(unitId) {
         var i;
 
         return Promise.all(chosen.map(function (c) { return ensureExam(c.unitId); })).then(function (exams) {
+          if (ctx.signal && ctx.signal.aborted) return fail('MIXED_PRACTICE_COMPOSE_CANCELLED', 499);
           if (exams.some(function (exam) { return !exam || !isArray(exam.parts) || exam.parts.length !== 1; }))
             return fail('MIXED_PRACTICE_EXAM_NOT_READY', 503);
                     var slots = [];
@@ -2478,12 +2480,20 @@ var seq = nextSeq();
         params: route.params,
         input: input,
         init: init,
+        signal: (init && init.signal) || (input && input.signal) || null,
         body: function () { return readBody(input, init); }
       };
       return Promise.resolve()
-        .then(function () { return dispatch(route.name, ctx); })
+        .then(function () {
+          return route.name === 'mixed-compose'
+            ? W.__xxggComposeRules.runCompose(ctx.signal, function () { return dispatch(route.name, ctx); })
+            : dispatch(route.name, ctx);
+        })
         .then(function (res) { return res || safeEnvelope(); },
-              function () { return safeEnvelope(); });
+              function (error) {
+                if (error && error.name === 'AbortError') throw error;
+                return safeEnvelope();
+              });
     }
 
     var scrubbed;
