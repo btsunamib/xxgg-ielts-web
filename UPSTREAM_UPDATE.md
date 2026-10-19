@@ -95,3 +95,12 @@ Removed the extra “逐 Part 自选篇目” editor, its script, controller sta
 The official native controller disables manual launch for an account without mixed-practice entitlement. The web bridge remains necessary: it composes the selected public units locally and grades real-account answers through ordinary practice requests. Mocked unentitled-account tests cover native reading and listening selection with the official compose endpoint refusing access; the bridged flow never calls that endpoint. No live unentitled student account was used.
 
 All 21 JavaScript chunks received fresh URLs together, with consistent imports, preload paths, bundle alias ranges and SHA-256 contracts. The released version marker was refreshed. All 131 current checks pass, including native manual/random launch actions and single-instance lazy navigation. Retired editor-only checks were removed with the deleted feature.
+
+
+## Review fallback and open-tab compatibility (2026-10-19)
+
+The accepted-answer controller previously fell back to the domain-root `/exam-review` URL when router navigation failed. It now prefers the router-resolved review URL, and its last-resort browser URL retains the deployment directory and hash route. Ordinary and mixed submissions preserve their accepted result/composition identifiers and never resubmit while recovering navigation.
+
+The two preceding deployed JavaScript graphs are retained unchanged. Removing old lazy chunks during deployment could break the review navigation of a tab opened before the update. New HTML uses only the current graph; older tabs can still load their original review page and shared application module.
+
+All 135 checks pass, including forced navigation failures for ordinary/mixed results, router-provided URLs, and traversal of both retained module graphs.

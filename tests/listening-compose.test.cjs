@@ -341,6 +341,42 @@ test('shipped ordinary listening and reading submit without unsupported cache he
   }
 });
 
+for (const mixed of [false, true]) {
+  test(`${mixed ? 'mixed' : 'ordinary'} accepted submission keeps the project/hash route when review navigation fails`, async () => {
+    const h = harness({ initial: session });
+    h.window.location.href = 'https://example.test/xxgg-ielts-web/?_v=old#/reading-exam';
+    let submits = 0;
+    await h.submit({
+      submitFn: async () => { submits++; return { success: true, data: mixed
+        ? { compositionId: 'mixed-accepted', status: 'submitted' } : { resultId: '2112112612008906754' } }; },
+      routeQuery: { channel: 'reading', setName: 'Bricks & Waste 中文', unitId: 'unit-1',
+        ...(mixed ? { sessionType: 'mixed', compositionId: 'mixed-accepted' } : {}) },
+      state: submitState(), clearProgress() {}, router: { push: async () => { throw new Error('lazy chunk unavailable'); } },
+    });
+    const destination = new URL(h.window.location.href, 'https://example.test');
+    assert.equal(destination.pathname, '/xxgg-ielts-web/');
+    assert.equal(destination.search, '');
+    assert.ok(destination.hash.startsWith('#/exam-review?'));
+    const query = new URLSearchParams(destination.hash.split('?')[1]);
+    assert.equal(query.get('setName'), 'Bricks & Waste 中文');
+    assert.equal(query.get(mixed ? 'compositionId' : 'resultId'), mixed ? 'mixed-accepted' : '2112112612008906754');
+    assert.equal(submits, 1, 'review recovery must not submit answers a second time');
+    expectSession(h);
+  });
+}
+
+test('review navigation fallback prefers the router-resolved URL for the current deployment', async () => {
+  const h = harness({ initial: session });
+  let resolved;
+  const href = '/another-project/#/exam-review?resultId=accepted';
+  await h.submit({ submitFn: async () => ({ success: true, data: { resultId: 'accepted' } }),
+    routeQuery: { channel: 'listening' }, state: submitState(), clearProgress() {},
+    router: { push: async () => { throw new Error('navigation failed'); }, resolve: target => { resolved = target; return { href }; } } });
+  assert.equal(h.window.location.href, href);
+  assert.equal(resolved.name, 'ExamReview');
+  assert.equal(resolved.query.resultId, 'accepted');
+});
+
 test('ordinary submission handles permission errors and an old-token expiry without clearing the current session', async () => {
   for (const response of [() => json({ code: '10403', msg: 'FORBIDDEN' }), () => json({ code: '403', msg: 'FORBIDDEN' }, 403)]) {
     const h = harness({ initial: session, fetch: async () => response() }), exam = ordinaryExam(h), state = submitState();

@@ -64,3 +64,23 @@ test('JS chunks have fresh URLs across the full dependency graph, with valid pre
     assert.match(path.basename(c.path), /-[0-9a-f]{8}\.js$/, 'every JS importer needs a fresh URL, including shared chunks');
   }
 });
+
+test('previous deployed module graphs remain available to tabs opened before an update', () => {
+  for (const entry of ['index-e7f3166d.js', 'index-16ba4ae5.js']) {
+    const visited = new Set();
+    function walk(name) {
+      if (visited.has(name)) return;
+      visited.add(name);
+      const file = path.join(root, 'assets', name);
+      assert.ok(fs.existsSync(file), `${entry}: old tabs still need ${name}`);
+      if (name.startsWith('index-')) assert.equal(name, entry, 'an old page must keep its original shared application module');
+      const source = fs.readFileSync(file, 'utf8');
+      for (const match of source.matchAll(/["']\.\/([^"']+\.js)["']/g)) walk(match[1]);
+    }
+    walk(entry);
+    assert.ok(visited.size >= 20, `${entry}: retain lazy pages and their shared imports`);
+    const main = fs.readFileSync(path.join(root, 'assets', entry), 'utf8');
+    const review = main.match(/import\("\.\/(ExamReviewPage-[^"]+\.js)"\)/)[1];
+    assert.ok(visited.has(review), 'the old review route must still load after submitting answers');
+  }
+});

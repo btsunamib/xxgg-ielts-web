@@ -1,6 +1,6 @@
 {
-  "version": "20261019-native-compose-only",
+  "version": "20261019-review-route-fallback",
   "appVersion": "0.9.17-rc.2",
-  "buildTime": "2026-10-19T09:03:26.508702+00:00",
+  "buildTime": "2026-10-19T09:28:01.880774+00:00",
   "upstreamReleaseDate": "2026-10-03T01:16:44.516Z"
 }
