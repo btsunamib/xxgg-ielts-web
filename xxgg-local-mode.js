@@ -252,6 +252,7 @@
     for (var si = 0; si < sources.length; si++) {
       var saved = safe(function () { return JSON.parse(sources[si] || 'null'); }, null);
       if (!isPlainObject(saved)) continue;
+      var preferSaved = num(saved.seq, 0) > store.seq;
       store.seq = Math.max(store.seq, num(saved.seq, 0));
       var comps = isPlainObject(saved.compositions) ? saved.compositions : {};
       var ids = Object.keys(comps);
@@ -259,6 +260,16 @@
       var attempts = isPlainObject(saved.attempts) ? saved.attempts : {};
       var resultIds = Object.keys(attempts);
       for (var ri = 0; ri < resultIds.length; ri++) if (!isPlainObject(store.attempts[resultIds[ri]])) store.attempts[resultIds[ri]] = attempts[resultIds[ri]];
+      var units = isPlainObject(saved.units) ? saved.units : {};
+      var unitIds = Object.keys(units);
+      for (var ui = 0; ui < unitIds.length; ui++) {
+        if (preferSaved || !isPlainObject(store.units[unitIds[ui]])) store.units[unitIds[ui]] = units[unitIds[ui]];
+      }
+      var index = isPlainObject(saved.partIndex) ? saved.partIndex : {};
+      var codes = Object.keys(index);
+      for (var ci = 0; ci < codes.length; ci++) {
+        if (preferSaved || !isPlainObject(store.partIndex[codes[ci]])) store.partIndex[codes[ci]] = index[codes[ci]];
+      }
     }
   }
 
@@ -270,7 +281,8 @@
   function saveCompositionRecords() {
     mergeCompositionRecords();
     capAttempts();
-    var backup = { seq: store.seq, compositions: {}, attempts: store.attempts };
+    var backup = { seq: store.seq, compositions: {}, attempts: store.attempts,
+      units: store.units, partIndex: store.partIndex };
     var ids = Object.keys(store.compositions);
     for (var i = 0; i < ids.length; i++) {
       var c = store.compositions[ids[i]];
@@ -348,14 +360,39 @@
     return 'PT-LOCAL-' + hash32(seed).toString(36).toUpperCase().slice(0, 8);
   }
 
+  // Project a composed attempt onto one source unit without creating another
+  // history entry. Its result ID opens only that unit's saved answers.
+  function attemptForUnit(attempt, unitId) {
+    if (!attempt) return null;
+    var uid = str(unitId);
+    if (str(attempt.unitId) === uid) return attempt;
+    if (!attempt.compositionId || !uid) return null;
+    var parts = asArray(attempt.parts).filter(function (p) { return str(p.originalUnitId || p.unitId) === uid; });
+    if (!parts.length) return null;
+    var ids = parts.map(partIdOf);
+    var details = asArray(attempt.details).filter(function (d) { return ids.indexOf(str(d.partId)) >= 0; });
+    var stats = asArray(attempt.partStats).filter(function (s) { return ids.indexOf(str(s.partId)) >= 0; });
+    var total = stats.reduce(function (n, s) { return n + num(s.total, 0); }, 0);
+    var correct = stats.reduce(function (n, s) { return n + num(s.correct, 0); }, 0);
+    var comp = store.compositions[attempt.compositionId];
+    var slot = asArray(comp && comp.slots).filter(function (s) { return str(s.unitId) === uid; })[0];
+    var resultId = str(attempt.id || attempt.resultId) + ':unit:' + encodeURIComponent(uid);
+    return Object.assign({}, attempt, {
+      id: resultId, resultId: resultId, unitId: uid, compositionId: '',
+      unitTitle: str(slot && (slot.titleEn || slot.title) || uid),
+      parts: parts, details: details, partIds: ids, partStats: stats, typeStats: [],
+      total: total, score: correct, accuracy: total ? correct / total : 0
+    });
+  }
+
   function unitAccuracyStats(unitId) {
     var sum = 0;
     var n = 0;
     var k;
     for (k in store.attempts) {
       if (!has(store.attempts, k)) continue;
-      var a = store.attempts[k];
-      if (!a || str(a.unitId) !== str(unitId)) continue;
+      var a = attemptForUnit(store.attempts[k], unitId);
+      if (!a) continue;
       var v = Number(a.accuracy);
       if (isFinite(v)) { sum += v; n += 1; }
     }
@@ -369,7 +406,7 @@
     for (k in store.attempts) {
       if (!has(store.attempts, k)) continue;
       var a = store.attempts[k];
-      if (a && str(a.unitId) === str(unitId)) return true;
+      if (attemptForUnit(a, unitId)) return true;
     }
     return false;
   }
@@ -747,7 +784,7 @@
           var ua = lookupAnswer(index, pid, qn, q);
           var right = '';
           if (q.rightAnswer !== undefined && q.rightAnswer !== null) right = q.rightAnswer;
-          else if (q.correctAnswer !== undefined && q.correctAnswer !== null) right = q.correctAnswer;
+          if (!str(right).trim()) right = str(q.correctAnswer).trim() ? q.correctAnswer : '';
           // Support the structured cache owned by server-compose and legacy
           // flat entries. Unit/qNumber keys must use the original unit ID.
           if (!str(right)) {
@@ -1115,7 +1152,12 @@ function codeByPartFor(unitId) {
   }
 
   function findAttempt(resultId) {
-    return store.attempts[str(resultId)] || null;
+    var id = str(resultId);
+    if (store.attempts[id]) return store.attempts[id];
+    var marker = id.lastIndexOf(':unit:');
+    if (marker < 0) return null;
+    var unitId = safe(function () { return decodeURIComponent(id.slice(marker + 6)); }, '');
+    return attemptForUnit(store.attempts[id.slice(0, marker)], unitId);
   }
 
   function handleResult(ctx) {
@@ -1865,7 +1907,7 @@ function codeByPartFor(unitId) {
         availabilityStatus: 'available',
         canOpenReview: true,
         canRedo: true,
-        reviewTarget: { type: 'single_attempt', attemptId: str(a.id), unitId: uid },
+        reviewTarget: { type: 'single_attempt', attemptId: str(a.id) + ':unit:' + encodeURIComponent(uid), unitId: uid },
         redoTarget: { type: 'unit_exam', unitId: uid },
         originalUnitId: uid,
         originalAlbumId: null,
@@ -2158,8 +2200,18 @@ var seq = nextSeq();
         var comp = isPlainObject(store.compositions[id]) ? store.compositions[id] : null;
         if (!comp) return fail('MIXED_PRACTICE_COMPOSITION_NOT_FOUND', 404);
         if (!parts || !parts.length) return fail('MIXED_PRACTICE_EXAM_NOT_READY', 503);
+        var submitted = asArray(b.parts);
+        var submittedIds = {};
+        for (var pi = 0; pi < submitted.length; pi++) {
+          var pid = partIdOf(submitted[pi]);
+          if (!pid || has(submittedIds, pid)) return fail('MIXED_PRACTICE_INVALID_PARTS', 422);
+          submittedIds[pid] = 1;
+        }
+        if (submitted.length !== parts.length || parts.some(function (part) { return !has(submittedIds, partIdOf(part)); })) {
+          return fail('MIXED_PRACTICE_NOT_ENOUGH_PARTS', 422);
+        }
         // Mixed submit body is {channel, parts, timer?} - no unitId/compositionId.
-        var graded = gradeExamParts(parts || [], b.parts);
+        var graded = gradeExamParts(parts, submitted);
         var seq = nextSeq();
         var resultId = 'local-mix-att-' + seq;
         var submittedAt = nowIso();
@@ -2184,6 +2236,14 @@ var seq = nextSeq();
           parts: graded.parts,
           details: graded.details
         };
+        var completedUnits = {};
+        for (var ui = 0; ui < graded.parts.length; ui++) {
+          var unitId = str(graded.parts[ui].originalUnitId || graded.parts[ui].unitId);
+          if (!unitId || completedUnits[unitId]) continue;
+          completedUnits[unitId] = 1;
+          var unitAttempt = attemptForUnit(store.attempts[resultId], unitId);
+          rememberUnit(unitId, channel, unitAttempt.parts, [], unitAttempt.resultId, submittedAt);
+        }
         if (comp) comp.lastAttemptId = resultId;
         capAttempts();
         if (!saveStore()) return fail('MIXED_PRACTICE_STORAGE_FULL', 507);

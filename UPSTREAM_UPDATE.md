@@ -70,3 +70,13 @@ Copy and Download TXT export all matching words in the active category across ev
 The format is `English | phonetic | POS | Chinese gloss`, with absent fields omitted, retaining `apple | 苹果`. Alternative accepted English expressions use ` / `; multiple POS use ` / `; meanings use `；`. Existing noun/verb/adjective/adverb names are normalized to `n.`/`v.`/`adj.`/`adv.`. Optional POS/phonetic API fields survive vocabulary normalization. Explicit POS already present in upstream glosses (such as `adj. 抽象的；n. 摘要`) are separated into the POS field. Missing dictionary information is not invented.
 
 The entire ES module graph is versioned together to retain one canonical bootstrap. Validation: `node --test tests/*.test.cjs` passes 124 checks, including the shipped vocabulary component's state/Part/category intersection, all-letter-band export, source overlap, optional metadata, partial-page guards, clipboard fallback and UTF-8 TXT downloads.
+
+## Composition audit repairs (2026-10-19)
+
+Account and device composition responses now include `channel`, so reading papers launch the reading page rather than falling back to listening.
+
+Device-local submissions reject missing, duplicate or unrelated Parts before recording a successful result; unanswered questions remain valid. Empty answer placeholders no longer mask a valid `correctAnswer`.
+
+Completed device-local mixed papers update source-unit progress and accuracy, and only-undone composition excludes those units. Each source result link and history item opens only its own saved passage, without duplicating the complete attempt in history. Progress and part-code mappings survive a reload through session storage when primary storage is full.
+
+Validation: `node --test tests/*.test.cjs` passes 135 checks against the shipped renderer and mocked APIs. New checks cover both channels and storage fallback. Live account/browser exercise remains separate.

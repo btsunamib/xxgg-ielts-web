@@ -1024,6 +1024,85 @@ test('an incomplete submitted paper never sends or claims a successful attempt',
   assert.equal(posts, 0);
 });
 
+for (const channel of ['reading', 'listening']) {
+  test(`local ${channel} refuses missing, duplicate and foreign submitted Parts without saving a result`, async () => {
+    const h = harness({ local: true, fetch: editorUpstream() });
+    const composition = await h.api.composeMixedPractice({ channel });
+    const exam = await h.api.getMixedPracticeExam(composition.compositionId);
+    const parts = exam.parts;
+    for (const invalid of [[], parts.slice(1), [parts[0], ...parts.slice(0, -1)],
+      [{ ...parts[0], id: 'foreign-part', partId: 'foreign-part' }, ...parts.slice(1)]]) {
+      await assert.rejects(() => h.api.submitMixedPracticeAttempt(composition.compositionId,
+        { channel, parts: invalid }), error => error.status === 422);
+      assert.equal(Object.keys(h.window.__xxggLocalMode.store.attempts).length, 0);
+      assert.equal(h.window.__xxggLocalMode.store.compositions[composition.compositionId].lastAttemptId, undefined);
+    }
+    // A student may leave answers blank; only missing/invalid Parts are refused.
+    const result = await h.api.submitMixedPracticeAttempt(composition.compositionId, { channel, parts });
+    assert.equal(result.status, 'submitted');
+    assert.equal(Object.keys(h.window.__xxggLocalMode.store.attempts).length, 1);
+  });
+}
+
+test('local grading uses correctAnswer when rightAnswer is an empty placeholder', async () => {
+  for (const placeholder of ['', '   ', null]) {
+    const part = unitPart(1);
+    Object.assign(part.groups[0].questions[0], { rightAnswer: placeholder, correctAnswer: 'answer-1' });
+    const h = harness({ local: true, fetch: async () => ok({ parts: [part] }) });
+    const result = await h.api.submitAttempt({ unitId: 'unit-1', channel: 'reading', parts: submittedPaper().parts.slice(0, 1) });
+    const review = await h.api.getAttemptReview(result.resultId);
+    assert.equal(review.details[0].rightAnswer, 'answer-1');
+    assert.equal(review.details[0].graded, true);
+    assert.equal(review.details[0].isCorrect, true);
+    assert.equal(review.attempt.score, 1);
+  }
+});
+
+for (const channel of ['reading', 'listening']) {
+  for (const rejectStorage of [false, true]) {
+  test(`local ${channel} mixed completion updates source progress, isolated reviews and only-undone selection${rejectStorage ? ' with primary storage full' : ''}`, async () => {
+    const upstream = editorUpstream();
+    const source = async (url, init) => {
+      const response = await upstream(url, init);
+      if (!new URL(url).pathname.endsWith('/exam')) return response;
+      const body = await response.json();
+      for (const part of body.data.parts) {
+        const q = part.groups[0].questions[0];
+        q.rightAnswer = `answer-${q.qNumber}`;
+      }
+      return json(body);
+    };
+    const h = harness({ local: true, fetch: source, rejectStorage });
+    const ids = Array.from({ length: channel === 'reading' ? 3 : 4 }, (_, i) => `${channel}-${i + 1}-a`);
+    const c = await h.api.composeMixedPractice({ channel, selectionMode: 'custom', selectedUnitIds: ids });
+    const exam = await h.api.getMixedPracticeExam(c.compositionId);
+    const parts = exam.parts.map((p, i) => ({ ...p, groups: p.groups.map(g => ({ ...g,
+      questions: g.questions.map(q => ({ ...q, userAnswer: i === 1 ? 'wrong' : q.rightAnswer })) })) }));
+    await h.api.submitMixedPracticeAttempt(c.compositionId, { channel, parts });
+    for (const current of [h, harness({ local: true, fetch: source, sharedStorage: h.localStorage,
+      sharedSessionStorage: h.sessionStorage, rejectStorage })]) {
+      const statuses = await current.api.getUnitStatus([], ids);
+      const history = await current.api.getPracticeHistoryRecords();
+      assert.equal(history.records.length, 1);
+      for (let i = 0; i < ids.length; i++) {
+        const status = statuses.list.find(s => s.unitId === ids[i]);
+        assert.equal(status.progressStatus, 'done');
+        assert.equal(status.myAccuracy, i === 1 ? 0 : 100);
+        const review = await current.api.getAttemptReview(status.resultId);
+        assert.equal(review.result.unitId, ids[i]);
+        assert.equal(review.parts.length, 1, 'a source review must not show the other composed passages');
+        assert.equal(review.attempt.score, i === 1 ? 0 : 1);
+        const historyItem = history.records[0].items.find(item => item.originalUnitId === ids[i]);
+        assert.equal(historyItem.reviewTarget.attemptId, status.resultId);
+      }
+      const next = await current.api.composeMixedPractice({ channel, onlyUndone: true, seed: 'undone-after-mix' });
+      assert.deepEqual(Array.from(next.slots, s => s.unitId), ids.map(id => id.replace(/-a$/, '-b')));
+      assert.equal(Object.keys(current.window.__xxggLocalMode.store.attempts).length, 1, 'source progress must not duplicate exam history');
+    }
+  });
+  }
+}
+
 test('local mixed practice rebuilds previously cached incomplete papers and retries missing sources', async () => {
   const parts = slots.slice(0, 3).map((s, i) => ({ ...unitPart(i + 1), originalUnitId: s.unitId }));
   const initial = { 'xxgg.local.v1': JSON.stringify({ compositions: { [compositionId]: { slots, parts, channel: 'listening' } } }) };
